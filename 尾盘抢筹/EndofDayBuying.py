@@ -39,7 +39,7 @@ class EndofDayBuying(Strategy):
         data = data.set_index('code') # 当天实时数据
         last_fc = last_fc.set_index('code') # 上一天因子值
         df_c = pd.concat([last_fc, data], axis=1, join='inner')
-        df_c.rename({'close': 'new_price'}, inplace=True)
+        df_c.rename({'close': 'new_price'}, axis=1, inplace=True)
         df_c['new_price_hfq'] = df_c['new_price'] * adjfactor.reindex(df_c.index)
         # s_dq_ama120_rate_keep_trend
         df_c['amt120_T-1'] = df_dict['amount'].iloc[1:].mean().reindex(df_c.index)
@@ -92,8 +92,12 @@ class EndofDayBuying(Strategy):
         var_list = ['close', 'amount', 's_dq_limit', 'stopping', 'high_hfq', 'close_hfq']
         index_list = ['code', 'trade_date']
         df_dict = {}
-        data = api_obj.wd_ashareeodprices(start_date=start_date2, end_date=end_date, mode='basic')[index_list+var_list[:4]]
-        data_hfq = api_obj.wd_ashareeodprices(start_date=start_date2, end_date=end_date, mode='hfq')[index_list+var_list[-2:]]
+        data = []; data_hfq = []
+        for dt1, dt2 in zip([start_date2, str(int(start_date1)+1)], [start_date1, end_date]):
+            data.append(api_obj.wd_ashareeodprices(start_date=dt1, end_date=dt2, mode='basic')[index_list+var_list[:4]])
+            data_hfq.append(api_obj.wd_ashareeodprices(start_date=dt1, end_date=dt2, mode='hfq').rename({'high': 'high_hfq', 'close': 'close_hfq'}, axis=1)[index_list+var_list[-2:]])
+        data = pd.concat(data, axis=0)
+        data_hfq = pd.concat(data_hfq, axis=0)
         for var in var_list:
             if 'hfq' in var:
                 df_dict[var] = data_hfq.pivot(index='trade_date', columns='code', values=var)
@@ -114,7 +118,7 @@ class EndofDayBuying(Strategy):
         f2 = api_obj.gj_ashare_dq_updown_limit(start_date=start_date1, end_date=end_date, limit=None)[['s_info_windcode','trade_dt','s_dq_limit_up_counts_l10d']].set_index(['trade_dt','s_info_windcode']).sort_index()
         f3 = api_obj.gj_ashare_dq_closetrend(start_date=start_date1, end_date=end_date, limit=None)[['s_info_windcode','trade_dt','s_dq_close_ma10','s_dq_amount_ama120']].set_index(['trade_dt','s_info_windcode']).sort_index()
         f4 = api_obj.gj_ashare_dq_ma_rate_keeptrend(start_date=start_date1, end_date=end_date, limit=None)[['s_info_windcode','trade_dt','s_dq_ma10_rate_keep_trend','s_dq_ama120_rate_keep_trend']].set_index(['trade_dt','s_info_windcode']).sort_index()
-        fc = pd.concat([f1,f2,f3,f4],axis=1).reset_index().rename({'trade_dt': 'trade_date', 's_info_windcode': 'code'}) # 截止到T-1
+        fc = pd.concat([f1,f2,f3,f4],axis=1).reset_index().rename({'trade_dt': 'trade_date', 's_info_windcode': 'code'}, axis=1) # 截止到T-1
 
 
         F = pd.merge(fc,Y,on=['code','trade_date'],how='right')
