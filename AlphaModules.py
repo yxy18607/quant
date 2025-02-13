@@ -109,7 +109,8 @@ class BackTest:
             self.alpha_df = self.alpha_df.apply(lambda row: grouprank_row(factor_group.loc[row.name], row), axis=1)
 
     def get_position(self):
-        self.pos_df = self.alpha_df.rank(axis=1, method='dense', pct=True).shift(1) - 0.5 # alpha delay 1
+        self.alpha_rk = self.alpha_df.rank(axis=1, method='dense', pct=True)-0.5
+        self.pos_df = self.alpha_rk.shift(1) # alpha delay 1
         self.wgt_df = self.pos_df.div(self.pos_df.abs().sum(1), axis=0)
 
     def ProfitAna(self, retdays=5, group=10):
@@ -147,7 +148,7 @@ class BackTest:
         for factor in factors.split('|'):
             factor_df = pd.read_pickle(f'./data/{factor}.pkl').loc[self.dateindex]
             factor_df = factor_df.sub(factor_df.mean(1), axis=0).div(factor_df.std(1), axis=0)
-            exp = self.pos_df.shift(-1).mul(factor_df).mean(1).mean()
+            exp = self.alpha_rk.mul(factor_df).mean(1).mean()
             exposure[factor] = exp
         exposure = pd.DataFrame(exposure, index=['exposure'])
         output = 'total exposure: \n'
@@ -160,7 +161,7 @@ class BackTest:
         exposure = {}
         for factor in factors.split('|'):
             factor_df = pd.read_pickle(f'./data/{factor}.pkl').loc[self.dateindex]
-            pos_df = self.pos_df.shift(-1).copy().fillna(-1)
+            pos_df = self.alpha_rk.copy().fillna(-1)
             gpos = np.floor((pos_df+0.5)*group)
             gpos[gpos==group] -= 1
             gpos = gpos.astype(int)
@@ -241,7 +242,7 @@ class BackTest:
         self.stats()
 
     def dump(self):
-        self.pos_df.shift(-1).to_pickle(f'./dump/{self.alpha_id[:-3]}_v2.pkl')
+        self.alpha_rk.to_pickle(f'./dump/{self.alpha_id[:-3]}_v2.pkl')
         print(f'------------------------{self.alpha_id[:-3]}_v2 dumped-----------------------')
 
 class Alpha:
