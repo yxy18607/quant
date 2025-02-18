@@ -1,5 +1,8 @@
 import numpy as np
 import pandas as pd
+import matplotlib
+# matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 class DailyCTA:
     def __init__(self, cfg):
@@ -18,14 +21,14 @@ class DailyCTA:
         for inst in instruments:
             df = pd.read_pickle(f'./data/{inst}.pkl').loc[self.dateindex]
             if trade_price == 'open':
-                df['returns'] = df['open'].pct_change()
+                df['returns'] = df['open'].pct_change().fillna(0)
                 self.pos = self.df_signal.shift(2).fillna(0)
             elif trade_price == 'close':
-                df['returns'] = df['pct_change']/100
+                df['returns'] = (df['pct_change']/100).fillna(0)
                 self.pos = self.df_signal.shift(1).fillna(0)
             elif trade_price == 'vwap':
                 df['vwap'] = df['amount'] / df['volume']
-                df['returns'] = df['vwap'].pct_change()
+                df['returns'] = df['vwap'].pct_change().fillna(0)
                 self.pos = self.df_signal.shift(2).fillna(0)
             self.data_dict[inst] = df
 
@@ -48,11 +51,10 @@ class DailyCTA:
             pnl[inst] = df['returns'] * self.pos[inst]
             pnl[inst] = pnl[inst] - self.pos[inst].diff(1).abs() * (self.fee + self.slippage / df['close'])
         pnl = pnl.mean(1)
-        self.pnl = pd.DataFrame({'pnl': pnl})
+        self.pnl = pd.DataFrame({'pnl': pnl, 'nav': pnl.cumsum()})
 
     def stat(self):
         self.pnl['year'] = self.pnl.index.str[:4]
-        self.pnl['nav'] = self.pnl['pnl'].cumsum()
         # total
         ret = self.pnl['pnl'].mean() * 250
         sp = self.pnl['pnl'].mean() / self.pnl['pnl'].std() * np.sqrt(250)
@@ -94,6 +96,16 @@ class DailyCTA:
         out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, tvr, winr*100, odd, calmar]
         print(out)
 
+    def plot_curve(self):
+        benchmark = pd.DataFrame()
+        for inst in self.data_dict.keys():
+            benchmark[inst] = self.data_dict[inst]['pct_change']/100
+        benchmark = benchmark.mean(1).cumsum()
+        plot_df = pd.DataFrame({'strategy': self.pnl['nav'], 'benchmark': benchmark})
+        plot_df.index = pd.to_datetime(plot_df.index)
+        plot_df.plot()
+        plt.show()
+
 class Beta:
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
@@ -117,6 +129,7 @@ class Beta:
             df = pd.read_pickle(f'./data/{inst}.pkl').loc[self.dateindex]
             signal = self.generate_beta(df)
             signal_df[inst] = signal
+        signal_df.index = self.dateindex
         self.signal_df = signal_df
 
     def generate_beta(self, df):
