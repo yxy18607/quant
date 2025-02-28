@@ -10,29 +10,17 @@ class DailyCTA:
         self.enddate = cfg.get('enddate')
         calendar = pd.read_pickle('./data/calendar.pkl')
         self.dateindex = calendar[(calendar>=self.startdate)&(calendar<=self.enddate)]
-        self.slippage = cfg.get('slippage')
-        self.fee = cfg.get('fee')
-        trade_price = cfg.get('trade_price') # ['close', 'open', 'vwap']
+        self.slippage = cfg.get('slippage') # 滑点，按盘口tick
+        self.fee = cfg.get('fee') # 手续费，按比例
+        self.trade_price = cfg.get('trade_price') # close: 按当日收盘成交 open: 按次日开盘成交 vwap: 按次日均价成交
         signal_id = cfg.get('signal_id')
-        instruments = cfg.get('instruments') # list
+        self.instruments = cfg.get('instruments') # list
+        self.mode = cfg.get('mode') # 1: long-only 2: short-only 0: long-short
 
-        self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl').loc[self.dateindex] # index = trade_date, columns=instruments, values=signals
-        self.data_dict = {}
-        for inst in instruments:
-            df = pd.read_pickle(f'./data/{inst}.pkl').loc[self.dateindex]
-            if trade_price == 'open':
-                df['returns'] = df['open'].pct_change().fillna(0)
-                self.pos = self.df_signal.shift(2).fillna(0)
-            elif trade_price == 'close':
-                df['returns'] = (df['pct_change']/100).fillna(0)
-                self.pos = self.df_signal.shift(1).fillna(0)
-            elif trade_price == 'vwap':
-                df['vwap'] = df['amount'] / df['volume']
-                df['returns'] = df['vwap'].pct_change().fillna(0)
-                self.pos = self.df_signal.shift(2).fillna(0)
-            self.data_dict[inst] = df
+        self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl').loc[self.dateindex, self.instruments] # index = trade_date, columns=instruments, values=signals
 
     def __call__(self):
+        self.get_pos()
         self.get_pnl()
         self.stat()
 
@@ -43,6 +31,29 @@ class DailyCTA:
             pos = self.pos[inst]
             pred_corr[inst] = pos.corr(ret)
         print(pred_corr)
+
+    def get_pos(self):
+        self.data_dict = {}
+        for inst in self.instruments:
+            df = pd.read_pickle(f'./data/{inst}.pkl').loc[self.dateindex]
+            if self.trade_price == 'open':
+                df['returns'] = df['open'].pct_change().fillna(0)
+            elif self.trade_price == 'close':
+                df['returns'] = (df['pct_change']/100).fillna(0)
+            elif self.trade_price == 'vwap':
+                df['vwap'] = df['amount'] / df['volume']
+                df['returns'] = df['vwap'].pct_change().fillna(0)
+            self.data_dict[inst] = df
+
+        if self.trade_price in ['open', 'vwap']:
+            self.pos = self.df_signal.shift(2).fillna(0)
+        elif self.trade_price == 'close':
+            self.pos = self.df_signal.shift(1).fillna(0)
+
+        if self.mode == 1:
+            self.pos = np.maximum(0, self.pos)
+        elif self.mode == 2:
+            self.pos = np.minimum(0, self.pos)
 
     def get_pnl(self):
         pnl = pd.DataFrame()
@@ -62,8 +73,12 @@ class DailyCTA:
         mdd = self.pnl['dd_T'].max()
         dd_end = self.pnl['dd_T'].idxmax()
         dd_start = self.pnl.loc[:dd_end, 'nav'].idxmax()
-        winr = (self.pnl['pnl']>0).mean()
-        odd = -self.pnl.loc[self.pnl['pnl']>0, 'pnl'].mean() / self.pnl.loc[self.pnl['pnl']<0, 'pnl'].mean()
+        self.pnl['if_trade'] = self.pos.diff().fillna(0).any(axis=1).astype(int)
+        self.pnl['trade_id'] = self.pnl['if_trade'].cumsum()
+        self.pnl['if_hold'] = self.pos.any(axis=1)
+        pnl_byid = self.pnl.loc[self.pnl['if_hold']].groupby('trade_id')['pnl'].sum()
+        winr = (pnl_byid>0).mean()
+        odd = -pnl_byid[pnl_byid>0].mean() / pnl_byid[pnl_byid<0].mean()
         calmar = ret / mdd
         tvr = self.pos.diff(1).abs().mean(1).mean(0)*250
 
@@ -75,8 +90,10 @@ class DailyCTA:
         mdd_y = gpnl['dd_y'].max()
         dd_end_y = gpnl['dd_y'].idxmax()
         dd_start_y = gpnl.apply(lambda x: x.loc[:dd_end_y[x['year'].values[0]], 'nav'].idxmax())
-        winr_y = gpnl['pnl'].apply(lambda x: (x>0).mean())
-        odd_y = gpnl['pnl'].apply(lambda x: -x[x>0].mean() / x[x<0].mean())
+        pnl_byid_y = self.pnl.loc[self.pnl['if_hold']].groupby(['trade_id', 'year'])['pnl'].sum()
+        gpnl_byid_y = pnl_byid_y.groupby(level='year')
+        winr_y = gpnl_byid_y.apply(lambda x: (x>0).mean())
+        odd_y = -gpnl_byid_y.apply(lambda x: x[x>0].mean() / x[x<0].mean())
         calmar_y = ret_y / mdd_y
         self.pnl['dpos'] = self.pos.diff(1).abs().mean(1)
         tvr_y = gpnl['dpos'].mean() * 250
