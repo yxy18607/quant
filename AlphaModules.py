@@ -222,7 +222,7 @@ class BackTest:
                             'dd_end': dd_end_y.values,
                             'tvr': tvr_y.values*100,
                             'winr': winr_y.values*100}, index=pd.MultiIndex.from_arrays([index1, index2], names=['from', 'to']))
-        out.loc[(self.dateindex[0], self.dateindex[-1]), :] = [ret_T*100, sp_T, mdd_T*100, dd_start_T, dd_end_T, tvr_T*100, winr_T*100]
+        out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret_T*100, sp_T, mdd_T*100, dd_start_T, dd_end_T, tvr_T*100, winr_T*100]
         print(out)
 
     def sigbt(self, topN=200):

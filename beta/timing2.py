@@ -9,7 +9,7 @@ sys.path.append('.')
 from BetaModules import Beta
 
 cfg = {'startdate': '20170101',
-       'enddate': '20250131',
+       'enddate': '20250228',
        'instruments': ['zzqz', 'zz500', 'zz1000']}
 
 class timing2(Beta):
