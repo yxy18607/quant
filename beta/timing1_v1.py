@@ -10,7 +10,7 @@ from BetaModules import Beta
 
 cfg = {'startdate': '20170101',
        'enddate': '20250228',
-       'instruments': ['hs300', 'zz500', 'zz1000']}
+       'instruments': ['zz500', 'zz1000']}
 
 class timing1_v1(Beta):
     def __init__(self, cfg):
@@ -23,8 +23,10 @@ class timing1_v1(Beta):
             if open[i] > 0.5*(high[i]+low[i]) and close[i] > 0.5*(high[i]+low[i]):
                 signal[i] = -1
             elif open[i] < 0.5*(high[i]+low[i]) and close[i] > 0.5*(high[i]+low[i]):
-                if open[i-1] < 0.5*(high[i-1]+low[i-1]) and close[i-1] > 0.5*(high[i-1]+low[i-1]):
+                if volume[i]>volume[i-1]:
                     signal[i] = 1
+                else:
+                    signal[i] = -1
             elif open[i] < 0.5*(high[i]+low[i]) and close[i] < 0.5*(high[i]+low[i]):
                 signal[i] = 1
         return signal
