@@ -8,7 +8,8 @@ class DailyCTA:
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
-        calendar = pd.read_pickle('./data/calendar.pkl')
+        self.zone = '' if not cfg.get('zone') else f"_{cfg.get('zone')}" # hk或us市场的交易日历不同，要分开处理
+        calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
         self.dateindex = calendar[(calendar>=self.startdate)&(calendar<=self.enddate)]
         self.slippage = cfg.get('slippage') # 滑点，按盘口tick
         self.fee = cfg.get('fee') # 手续费，按比例
@@ -17,7 +18,7 @@ class DailyCTA:
         self.instruments = cfg.get('instruments') # list
         self.mode = cfg.get('mode') # 1: long-only 2: short-only 0: long-short
 
-        self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl').loc[self.dateindex, self.instruments] # index = trade_date, columns=instruments, values=signals
+        self.df_signal = pd.read_pickle(f'./dump/{signal_id}{self.zone}.pkl').loc[self.dateindex, self.instruments] # index = trade_date, columns=instruments, values=signals
         print(f"--------------backtesting {signal_id}--------------")
 
     def __call__(self):
@@ -137,7 +138,8 @@ class Beta:
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
-        self.calendar = pd.read_pickle('./data/calendar.pkl')
+        self.zone = '' if not cfg.get('zone') else f"_{cfg.get('zone')}" # hk或us市场的交易日历不同，要分开处理
+        self.calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
         self.instruments = cfg.get('instruments')
         _startdate = self.calendar.searchsorted(self.startdate, 'left')
         _enddate = self.calendar.searchsorted(self.enddate, side='right')
@@ -163,5 +165,5 @@ class Beta:
         pass
 
     def dump(self):
-        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')
+        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}{self.zone}.pkl')
 
