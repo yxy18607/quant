@@ -108,11 +108,6 @@ class BackTest:
             factor_group[factor_group == group] -= 1
             self.alpha_df = self.alpha_df.apply(lambda row: grouprank_row(factor_group.loc[row.name], row), axis=1)
 
-    def get_position(self):
-        self.alpha_rk = self.alpha_df.rank(axis=1, method='dense', pct=True)-0.5
-        self.pos_df = self.alpha_rk.shift(1) # alpha delay 1
-        self.wgt_df = self.pos_df.div(self.pos_df.abs().sum(1), axis=0)
-
     def ProfitAna(self, retdays=5, group=10):
         pos_df = self.pos_df.copy().fillna(-1)
         ret_df = self.returns.rolling(retdays).sum().shift(-retdays).fillna(0)
@@ -131,17 +126,17 @@ class BackTest:
         print(f'group {retdays} days return:')
         print(output)
         # group winrate
-        # gpos[ret_df<=0] = -1
-        # valid = gpos>=0
-        # vldidx = valid.index[valid.sum(1)>0]
-        # nPosInsts = gpos.loc[vldidx].apply(lambda x: np.bincount(x[valid.loc[x.name]]), axis=1)
-        # gwinr = pd.DataFrame((nPosInsts / nInsts[vldidx]).tolist(), index=vldidx).mean()
-        # output = ''
-        # for idx, row in gwinr.items():
-        #     output += '{}: {:.2%}| '.format(idx, row)
-        # output = output[:-2]
-        # print(f'group {retdays} days winrate:')
-        # print(output)
+        gpos[ret_df<=0] = -1
+        valid = gpos>=0
+        vldidx = valid.index[valid.sum(1)>0]
+        nPosInsts = gpos.loc[vldidx].apply(lambda x: np.bincount(x[valid.loc[x.name]]), axis=1)
+        gwinr = pd.DataFrame((nPosInsts / nInsts[vldidx]).tolist(), index=vldidx).mean()
+        output = ''
+        for idx, row in gwinr.items():
+            output += '{}: {:.2%}| '.format(idx, row)
+        output = output[:-2]
+        print(f'group {retdays} days winrate:')
+        print(output)
 
     def FactorAna(self, factors: str):
         exposure = {}
@@ -182,8 +177,13 @@ class BackTest:
         output = output[:-1]
         print(output)
 
+    def get_position(self):
+        self.alpha_rk = self.alpha_df.rank(axis=1, method='dense', pct=True)-0.5
+        self.pos_df = self.alpha_rk.shift(1) # alpha delay 1
+        self.wgt_df = self.pos_df.div(self.pos_df.abs().sum(1), axis=0)
+
     def generate_pnl(self):
-        ret_df = self.returns.shift(-1).fillna(0)
+        ret_df = self.returns.shift(-1)
         pnl = self.wgt_df.mul(ret_df).sum(1).shift(1)*2
         self.pnl = pd.DataFrame({'pnl': pnl})
         self.pnl['nav'] = self.pnl['pnl'].cumsum()
@@ -196,7 +196,9 @@ class BackTest:
         mdd_T = self.pnl['dd_T'].max()
         dd_end_T = self.pnl['dd_T'].idxmax()
         dd_start_T = self.pnl.loc[:dd_end_T, 'nav'].idxmax()
-        self.pnl['dpos'] = self.wgt_df.fillna(0).diff(1).abs().sum(1)
+        dpos = self.wgt_df.fillna(0).diff()
+        dpos[self.wgt_df.isna()&self.wgt_df.shift(1).isna()] = np.nan
+        self.pnl['dpos'] = dpos.abs().sum(1)
         tvr_T = self.pnl['dpos'].mean()
         winr_T = (self.pnl['pnl']>0).mean()
 
@@ -225,18 +227,26 @@ class BackTest:
         out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret_T*100, sp_T, mdd_T*100, dd_start_T, dd_end_T, tvr_T*100, winr_T*100]
         print(out)
 
-    def sigbt(self, topN=200):
+    def sigbt(self, topN=200, weight_mode=0, benchmark='zzqz', excess=True):
+        # excess=True，超额；excess=False，纯多头; weight_mode=1，等权，weight_mode=0，线性
         total = (~self.pos_df.isna()).sum(1)
         th = 0.5-topN/total
         pos = self.pos_df.values
         pos[pos<=th.values[:, np.newaxis]] = np.nan
         self.pos_df[:] = pos
-        self.wgt_df = self.pos_df.div(self.pos_df.sum(1), axis=0)
-        ret_df = self.returns.shift(-1).fillna(0)
+        if weight_mode:
+            nancount = self.wgt_df.notna().sum(1).values
+            wgt = np.where(nancount==0, np.nan, 1/nancount)
+            self.wgt_df = self.wgt_df.notna()*wgt[:, np.newaxis]
+            self.wgt_df[self.wgt_df==0] = np.nan
+        else:
+            self.wgt_df = self.pos_df.div(self.pos_df.sum(1), axis=0)
+        ret_df = self.returns.shift(-1)
         pnl = self.wgt_df.mul(ret_df).sum(1).shift(1)
 
-        mkt = pd.read_pickle('./data/mkt.pkl').loc[self.dateindex, 'pct_change'] / 100
-        pnl -= mkt
+        if excess:
+            mkt = pd.read_pickle(f'./data/{benchmark}.pkl').loc[self.dateindex, 'pct_change'] / 100
+            pnl -= mkt
         self.pnl = pd.DataFrame({'pnl': pnl})
         self.pnl['nav'] = self.pnl['pnl'].cumsum()
         self.stats()

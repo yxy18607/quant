@@ -8,7 +8,8 @@ class DailyCTA:
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
-        calendar = pd.read_pickle('./data/calendar.pkl')
+        self.zone = '' if not cfg.get('zone') else f"_{cfg.get('zone')}" # hk或us市场的交易日历不同，要分开处理
+        calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
         self.dateindex = calendar[(calendar>=self.startdate)&(calendar<=self.enddate)]
         self.slippage = cfg.get('slippage') # 滑点，按盘口tick
         self.fee = cfg.get('fee') # 手续费，按比例
@@ -17,7 +18,8 @@ class DailyCTA:
         self.instruments = cfg.get('instruments') # list
         self.mode = cfg.get('mode') # 1: long-only 2: short-only 0: long-short
 
-        self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl').loc[self.dateindex, self.instruments] # index = trade_date, columns=instruments, values=signals
+        self.df_signal = pd.read_pickle(f'./dump/{signal_id}{self.zone}.pkl').loc[self.dateindex, self.instruments] # index = trade_date, columns=instruments, values=signals
+        print(f"--------------backtesting {signal_id}--------------")
 
     def __call__(self):
         self.get_pos()
@@ -113,21 +115,31 @@ class DailyCTA:
         out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, tvr, winr*100, odd, calmar]
         print(out)
 
-    def plot_curve(self):
+    def plot_curve(self, os_startdate:str=None):
         benchmark = pd.DataFrame()
         for inst in self.data_dict.keys():
             benchmark[inst] = self.data_dict[inst]['pct_change']/100
         benchmark = benchmark.mean(1).cumsum()
         plot_df = pd.DataFrame({'strategy': self.pnl['nav'], 'benchmark': benchmark})
         plot_df.index = pd.to_datetime(plot_df.index)
-        plot_df.plot()
+        if not os_startdate:
+            plot_df.plot()
+        else:
+            plot_df['is'] = plot_df.index<pd.to_datetime(os_startdate)
+            ax = plot_df.loc[plot_df['is'], 'strategy'].plot(color='#1f77b4', label='strategy(IS)', figsize=(12, 6))
+            plot_df.loc[plot_df['is'], 'benchmark'].plot(ax=ax, color='#ffbb78', label='benchmark(IS)')
+            plot_df.loc[~plot_df['is'], 'strategy'].plot(ax=ax, color='#d62728', label='strategy(OS)')
+            plot_df.loc[~plot_df['is'], 'benchmark'].plot(ax=ax, color='#ff7f0e', label='benchmark(OS)')
+            ax.axvline(pd.to_datetime(os_startdate), color="black", linestyle="--")  # 添加分割线
+        plt.legend()
         plt.show()
 
 class Beta:
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
-        self.calendar = pd.read_pickle('./data/calendar.pkl')
+        self.zone = '' if not cfg.get('zone') else f"_{cfg.get('zone')}" # hk或us市场的交易日历不同，要分开处理
+        self.calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
         self.instruments = cfg.get('instruments')
         _startdate = self.calendar.searchsorted(self.startdate, 'left')
         _enddate = self.calendar.searchsorted(self.enddate, side='right')
@@ -153,5 +165,5 @@ class Beta:
         pass
 
     def dump(self):
-        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')
+        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}{self.zone}.pkl')
 
