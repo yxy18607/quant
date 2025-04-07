@@ -7,9 +7,16 @@ MAX_INSTS = 10000
 
 class BackTest:
     """
-    for in-sample and out-sample cross-sectional alpha backtest
-    # inputs: daily signal, stock_info, prices, cfg
-    # outputs: backtest stats
+    cfg参数配置说明
+    -----------------------------------------------------
+    key             value           comment
+
+    startdate       str             回测起始日
+    enddate         str             回测终止日
+    slippage        float64         回测绝对滑点值
+    fee             float64         回测百分比费率
+    signal_id       str             读取的信号名称(包含多品种的信号)
+    mode            int             0-多空信号; 1-纯多头信号; 2-纯空头信号
     """
     def __init__(self, cfg):
         self.cfg = cfg
@@ -21,7 +28,7 @@ class BackTest:
         self.calendar = pd.read_pickle('./data/calendar.pkl')
         self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
 
-        self.signal_df = pd.read_pickle(f'./dump/{self.signal_id}.pkl') # 这里的信号是因子转换成仓位后的结果
+        self.signal_df = pd.read_pickle(f'./dump/{self.signal_id}.pkl')
         self.listdays = pd.read_pickle('./data/listdays.pkl').loc[self.dateindex]
         self.suspend = pd.read_pickle('./data/is_suspend.pkl').loc[self.dateindex]
         self.st = pd.read_pickle('./data/is_st.pkl').loc[self.dateindex]
@@ -131,13 +138,22 @@ class BackTest:
         print(out)
 
 class Beta:
+    """
+    cfg参数配置说明
+    --------------------------------------------------
+    key             value           comment
+
+    startdate       str             信号计算起始日
+    enddate         str             信号计算终止日
+    combo           bool            是否为组合类信号, 信号计算默认回溯, 如果是组合类则不回溯
+    """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
         self.combo = cfg.get('combo') # bool
         self.calendar = pd.read_pickle('./data/calendar.pkl')
         if not self.combo:
-            _startdate = self.calendar.searchsorted(self.startdate, 'left')-250+1
+            _startdate = self.calendar.searchsorted(self.startdate, 'left')-60
         else:
             _startdate = self.calendar.searchsorted(self.startdate, 'left')
         _enddate = self.calendar.searchsorted(self.enddate, side='right')
@@ -154,11 +170,10 @@ class Beta:
     def generate_daily(self, didx):
         pass
 
-    def generate_beta(self):
+    def generate_signal(self):
         pass
 
     def dump(self):
-        # self.alpha_df = self.alpha_df.loc[self.alpha_df.index>=self.startdate]
         self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')
 
     
