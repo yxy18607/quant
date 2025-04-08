@@ -8,10 +8,6 @@ import sys
 sys.path.append('.')
 from BetaModules import Beta
 
-cfg = {'startdate': '20170101',
-       'enddate': '20250228',
-       'instruments': ['zz500', 'zz1000']}
-
 class timing5(Beta):
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -20,6 +16,3 @@ class timing5(Beta):
         factor1 = pd.read_pickle('./dump/timing1.pkl')
         factor2 = pd.read_pickle('./dump/timing2.pkl')
         self.signal_df = (factor1+factor2)/2
-
-beta = timing5(cfg)
-beta()
