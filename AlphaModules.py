@@ -313,17 +313,13 @@ class Alpha:
 
     startdate       str             因子计算起始日
     enddate         str             因子计算终止日
-    combo           bool            是否为组合类因子, 因子计算默认回溯, 如果是组合类则不回溯
+    因子计算默认回溯120日, 保证回测起始日有因子值
     """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
-        self.combo = cfg.get('combo')
         self.calendar = pd.read_pickle('./data/calendar.pkl')
-        if not self.combo:
-            _startdate = self.calendar.searchsorted(self.startdate, 'left')-120
-        else:
-            _startdate = self.calendar.searchsorted(self.startdate, 'left')
+        _startdate = self.calendar.searchsorted(self.startdate, 'left')-120
         _enddate = self.calendar.searchsorted(self.enddate, side='right')
         _mindate = self.calendar.searchsorted('20140101', 'left')
 
