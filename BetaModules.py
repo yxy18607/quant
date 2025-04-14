@@ -17,29 +17,45 @@ class DailyCTA:
     fee             float64         回测百分比费率
     trade_price     str             open-按日次开盘价撮合; close-按当日收盘价撮合; vwap-按次日均价撮合
     signal_id       str             读取的信号名称(包含多品种的信号)
-    instruments     list            回测的品种列表
+    instruments     list, dict      回测的交易品种列表, list-发信号和交易的品种一一对应, dict-发信号和交易的是不同的品种, 由key和value确定对应关系
     mode            int             0-多空信号; 1-纯多头信号; 2-纯空头信号
     """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
         self.zone = '' if not cfg.get('zone') else f"_{cfg.get('zone')}"
-        calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
-        self.dateindex = calendar[(calendar>=self.startdate)&(calendar<=self.enddate)]
         self.slippage = cfg.get('slippage')
         self.fee = cfg.get('fee')
         self.trade_price = cfg.get('trade_price')
         signal_id = cfg.get('signal_id')
-        self.instruments = cfg.get('instruments')
+        instruments = cfg.get('instruments')
         self.mode = cfg.get('mode')
 
-        self.df_signal = pd.read_pickle(f'./dump/{signal_id}{self.zone}.pkl').loc[self.dateindex, self.instruments]
+        calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
+        self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl')
+        self.check_calendar(calendar)
+        self.trading_insts(instruments)
         print(f"--------------backtesting {signal_id}--------------")
 
     def __call__(self):
         self.get_pos()
         self.get_pnl()
         self.stat()
+    
+    def check_calendar(self, calendar):
+        dateindex = self.df_signal.index.intersection(calendar)
+        self.dateindex = pd.Series(dateindex[(dateindex>=self.startdate)&(dateindex<=self.enddate)])
+    
+    def trading_insts(self, instruments):
+        if isinstance(instruments, dict):
+            signal_col = list(instruments.keys())
+            trade_col = list(instruments.values())
+            self.instruments = trade_col
+            self.df_signal = self.df_signal.loc[self.dateindex, signal_col]
+            self.df_signal.columns = trade_col
+        else:
+            self.df_signal = self.df_signal.loc[self.dateindex, instruments]
+            self.instruments = instruments
 
     def profit_ana(self, retdays=10):
         pred_corr = pd.Series()
@@ -56,7 +72,7 @@ class DailyCTA:
             if self.trade_price == 'open':
                 df['returns'] = df['open'].pct_change().fillna(0)
             elif self.trade_price == 'close':
-                df['returns'] = (df['pct_change']/100).fillna(0)
+                df['returns'] = df['close'].pct_change().fillna(0)
             elif self.trade_price == 'vwap':
                 df['vwap'] = df['amount'] / df['volume']
                 df['returns'] = df['vwap'].pct_change().fillna(0)
@@ -186,5 +202,5 @@ class Beta:
         pass
 
     def dump(self):
-        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}{self.zone}.pkl')
+        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')
 
