@@ -1,17 +1,9 @@
-"""timing
-"""
-
 import numpy as np
 import pandas as pd
 import sys
 
 sys.path.append('.')
 from BetaModules import Beta
-
-cfg = {'startdate': '20170101',
-       'enddate': '20250228',
-    #    'zone': 'hk',
-       'instruments': ['zz500', 'zz1000']}
 
 class timing1(Beta):
     def __init__(self, cfg):
@@ -31,6 +23,3 @@ class timing1(Beta):
             elif open[i] < 0.5*(high[i]+low[i]) and close[i] < 0.5*(high[i]+low[i]):
                 signal[i] = 1
         return signal
-
-beta = timing1(cfg)
-beta()
