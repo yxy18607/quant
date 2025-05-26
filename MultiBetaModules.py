@@ -2,6 +2,7 @@
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 MAX_INSTS = 10000
 
@@ -28,11 +29,11 @@ class BackTest:
         self.calendar = pd.read_pickle('./data/calendar.pkl')
         self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
 
-        self.signal_df = pd.read_pickle(f'./dump/{self.signal_id}.pkl')
+        self.signal_df = pd.read_pickle(f'./dump/{self.signal_id}.pkl').loc[self.dateindex]
         self.listdays = pd.read_pickle('./data/listdays.pkl').loc[self.dateindex]
         self.suspend = pd.read_pickle('./data/is_suspend.pkl').loc[self.dateindex]
         self.st = pd.read_pickle('./data/is_st.pkl').loc[self.dateindex]
-        self.open = pd.read_pickle('./data/open.pkl').loc[self.dateindex]
+        self.open = pd.read_pickle('./data/adjopen.pkl').loc[self.dateindex]
         self.close = pd.read_pickle('./data/close.pkl').loc[self.dateindex]
         self.limit = pd.read_pickle('./data/limit.pkl').loc[self.dateindex]
         self.stopping = pd.read_pickle('./data/stopping.pkl').loc[self.dateindex]
@@ -41,12 +42,11 @@ class BackTest:
 
         self.get_valid()
         
-        self.fee = cfg.get('fee')
+        self.fee = cfg.get('fee') if cfg.get('fee') is not None else 0
         print(f'------------------------backtesting {self.signal_id}-----------------------')
 
     def __call__(self):
         self.get_position()
-        self.beta_ana()
         self.generate_pnl()
         self.stats()
     
@@ -56,26 +56,26 @@ class BackTest:
         rl = self.listdays >= 300 # exclude recently listed stocks and delisted stocks
         suspend = ~self.suspend # exclude suspended stocks
         bj = ~self.close.columns.str.contains('BJ')
-        bj = pd.DataFrame(np.tile(bj, (len(self.close.index), 1)), index=self.close.index, columns=self.price.columns)
+        bj = pd.DataFrame(np.tile(bj, (len(self.close.index), 1)), index=self.close.index, columns=self.close.columns)
         valid = lp & st & rl & suspend & bj
         self.valid = valid
         self.signal_df.where(valid, np.nan, inplace=True)
 
-    def beta_ana(self, period=5):
-        fret = self.open.pct_change(period)
+    def beta_ana(self, period=1):
+        fret = self.open.pct_change(period, fill_method=None)
         signal = self.signal_df.shift(period+1)
-        ic = fret.corrwith(signal, axis=1)
         rollingic = fret.rolling(120).corr(signal).mean(1).dropna()
-        print(f"history ic: {ic.mean()}")
-        print(f"rolling ic: {rollingic}")
-        rollingic.index = pd.to_datetime(rollingic.index)
-        rollingic.plot()
+        cumic = rollingic.cumsum()
+        print(f"avg ic: {rollingic.mean()}")
+        cumic.index = pd.to_datetime(cumic.index)
+        cumic.plot()
+        plt.show()
 
     def get_position(self):
         self.pos_df = self.signal_df.shift(1) # 收盘发信号，次日开盘生成仓位
         # 涨停无法买入、跌停无法卖出、停牌无法交易
-        limit_pos = self.limit_state & self.pos_df.diff()>0
-        stop_pos = self.stop_state & self.pos_df.diff()<0
+        limit_pos = self.limit_state & (self.pos_df.diff()>0)
+        stop_pos = self.stop_state & (self.pos_df.diff()<0)
         self.pos_df[limit_pos|stop_pos|self.suspend] = np.nan
         self.pos_df.where(~(limit_pos|stop_pos|self.suspend), self.pos_df.ffill(), inplace=True)
         self.pos_df = self.pos_df.shift(1) # T+2获得持仓收益
@@ -87,7 +87,7 @@ class BackTest:
 
         self.dpos_df = self.pos_df.fillna(0).diff() # 计算调仓幅度需剔除nan的影响
         self.dpos_df[self.pos_df.isna()] = np.nan
-        self.returns = self.open.pct_change().fillna(0)
+        self.returns = self.open.pct_change(fill_method=None).fillna(0)
 
     def generate_pnl(self):
         pnl = self.pos_df.mul(self.returns)
@@ -137,6 +137,25 @@ class BackTest:
         out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, tvr, winr*100, odd, calmar]
         print(out)
 
+    def plot_curve(self, os_startdate:str=None):
+        benchmark = self.returns.mean(1).cumsum()
+        plot_df = pd.DataFrame({'strategy': self.pnl['nav'], 'benchmark': benchmark})
+        plot_df.index = pd.to_datetime(plot_df.index)
+        if not os_startdate:
+            plot_df.plot()
+        else:
+            plot_df['is'] = plot_df.index<pd.to_datetime(os_startdate)
+            ax = plot_df.loc[plot_df['is'], 'strategy'].plot(color='#1f77b4', label='strategy(IS)', figsize=(12, 6))
+            plot_df.loc[plot_df['is'], 'benchmark'].plot(ax=ax, color='#ffbb78', label='benchmark(IS)')
+            plot_df.loc[~plot_df['is'], 'strategy'].plot(ax=ax, color='#d62728', label='strategy(OS)')
+            plot_df.loc[~plot_df['is'], 'benchmark'].plot(ax=ax, color='#ff7f0e', label='benchmark(OS)')
+            ax.axvline(pd.to_datetime(os_startdate), color="black", linestyle="--")  # 添加分割线
+        plt.legend()
+        plt.show()
+
+    def save_pnl(self):
+        self.pnl['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+
 class Beta:
     """
     cfg参数配置说明
@@ -145,17 +164,14 @@ class Beta:
 
     startdate       str             信号计算起始日
     enddate         str             信号计算终止日
-    combo           bool            是否为组合类信号, 信号计算默认回溯, 如果是组合类则不回溯
+    信号计算默认多回溯60天数据, 防止出现前几个交易日无信号的情况
     """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
         self.combo = cfg.get('combo') # bool
         self.calendar = pd.read_pickle('./data/calendar.pkl')
-        if not self.combo:
-            _startdate = self.calendar.searchsorted(self.startdate, 'left')-60
-        else:
-            _startdate = self.calendar.searchsorted(self.startdate, 'left')
+        _startdate = self.calendar.searchsorted(self.startdate, 'left')-60
         _enddate = self.calendar.searchsorted(self.enddate, side='right')
         _mindate = self.calendar.searchsorted('20140101', 'left')
 
@@ -163,9 +179,10 @@ class Beta:
         self.signal_df = pd.DataFrame()
         
     def hf_to_daily(self):
+        self.daily_df = pd.DataFrame()
         for didx in self.dateindex:
             daily = self.generate_daily(didx)
-            self.signal_df.loc[didx] = daily
+            self.daily_df.loc[didx] = daily
 
     def generate_daily(self, didx):
         pass
