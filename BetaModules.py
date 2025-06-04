@@ -19,6 +19,7 @@ class DailyCTA:
     signal_id       str             读取的信号名称(包含多品种的信号)
     instruments     list, dict      回测的交易品种列表, list-发信号和交易的品种一一对应, dict-发信号和交易的是不同的品种, 由key和value确定对应关系
     mode            int             0-多空信号; 1-纯多头信号; 2-纯空头信号
+    period          str             绩效统计周期, Y-yearly; M-monthly, 默认Y
     """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
@@ -30,12 +31,15 @@ class DailyCTA:
         signal_id = cfg.get('signal_id')
         instruments = cfg.get('instruments')
         self.mode = cfg.get('mode')
+        self.period = 'Y' if cfg.get('period') is None else cfg.get('period')
 
         calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
         self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl')
         self.check_calendar(calendar)
         self.trading_insts(instruments)
         print(f"--------------backtesting {signal_id}--------------")
+
+        self.signal_id = signal_id
 
     def __call__(self):
         self.get_pos()
@@ -98,7 +102,6 @@ class DailyCTA:
         self.pnl = pd.DataFrame({'pnl': pnl, 'nav': pnl.cumsum()})
 
     def stat(self):
-        self.pnl['year'] = self.pnl.index.str[:4]
         # total
         ret = self.pnl['pnl'].mean() * 250
         sp = self.pnl['pnl'].mean() / self.pnl['pnl'].std() * np.sqrt(250)
@@ -115,16 +118,22 @@ class DailyCTA:
         calmar = ret / mdd
         tvr = self.pos.diff(1).abs().mean(1).mean(0)*250
 
-        # yearly
-        gpnl = self.pnl.groupby('year')
+        # by period
+        if self.period == 'Y':
+            group_col = 'year'
+            self.pnl[group_col] = self.pnl.index.str[:4]
+        elif self.period == 'M':
+            group_col = 'month'
+            self.pnl[group_col] = self.pnl.index.str[:6]
+        gpnl = self.pnl.groupby(group_col)
         self.pnl['dd_y'] = gpnl['nav'].cummax() - self.pnl['nav']
         ret_y = gpnl['pnl'].mean() * 250
         sp_y = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(250)
         mdd_y = gpnl['dd_y'].max()
         dd_end_y = gpnl['dd_y'].idxmax()
-        dd_start_y = gpnl.apply(lambda x: x.loc[:dd_end_y[x['year'].values[0]], 'nav'].idxmax())
-        pnl_byid_y = self.pnl.loc[self.pnl['if_hold']].groupby(['trade_id', 'year'])['pnl'].sum()
-        gpnl_byid_y = pnl_byid_y.groupby(level='year')
+        dd_start_y = gpnl.apply(lambda x: x.loc[:dd_end_y[x[group_col].values[0]], 'nav'].idxmax())
+        pnl_byid_y = self.pnl.loc[self.pnl['if_hold']].groupby(['trade_id', group_col])['pnl'].sum()
+        gpnl_byid_y = pnl_byid_y.groupby(level=group_col)
         winr_y = gpnl_byid_y.apply(lambda x: (x>0).mean())
         odd_y = -gpnl_byid_y.apply(lambda x: x[x>0].mean() / x[x<0].mean())
         calmar_y = ret_y / mdd_y
@@ -164,6 +173,9 @@ class DailyCTA:
             ax.axvline(pd.to_datetime(os_startdate), color="black", linestyle="--")  # 添加分割线
         plt.legend()
         plt.show()
+
+    def save_pnl(self):
+        self.pnl['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
 class Beta:
     """

@@ -4,14 +4,17 @@ import importlib
 import os
 
 # beta_list = [f[:-3] for f in os.listdir('./beta') if f.startswith('beta') and f.endswith('.py')]
-beta_list = ['timing1', 'timing2', 'timing5']
+beta_list = ['timing3']
+# beta_list = ['timing1', 'timing2', 'timing5']
 
 # mode:0——重写，1——更新
 mode = 0
 
 cfg = {'startdate': '20180101',
-       'enddate': '20250331',
-       'instruments': ['zz1000', 'zz500', 'hs300', 'sz50']}
+       'enddate': '20250528',
+       'instruments': ['zz1000', 'zz500', 'hs300', 'sz50'],
+    #    'zone': 'hk'
+}
 
 for beta_file in beta_list:
     module_path = f"beta.{beta_file}"  # 转换为可import的路径
