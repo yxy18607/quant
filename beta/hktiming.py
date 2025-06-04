@@ -5,15 +5,14 @@ import sys
 sys.path.append('.')
 from BetaModules import Beta
 
-class timing1_v1(Beta):
+class hktiming(Beta):
     def __init__(self, cfg):
         super().__init__(cfg)
         
     def generate_beta(self, df):
-        open = df['open'].values; high = df['high'].values; low = df['low'].values; close = df['close'].values; volume = df['volume'].values; ret = df['pct_change'].values
-        rcorr = df['pct_change'].rolling(5).corr(df['volume']).values
+        open = df['open'].values; high = df['high'].values; low = df['low'].values; close = df['close'].values; volume = df['volume'].values; ret = df['pct_change']
         signal = np.full(len(df), 0)
-        for i in range(4, len(df)):
+        for i in range(1, len(df)):
             if open[i] > 0.5*(high[i]+low[i]) and close[i] > 0.5*(high[i]+low[i]):
                 signal[i] = -1
             elif open[i] < 0.5*(high[i]+low[i]) and close[i] > 0.5*(high[i]+low[i]):
@@ -23,9 +22,4 @@ class timing1_v1(Beta):
                     signal[i] = -1
             elif open[i] < 0.5*(high[i]+low[i]) and close[i] < 0.5*(high[i]+low[i]):
                 signal[i] = 1
-            elif open[i] > 0.5*(high[i]+low[i]) and close[i] < 0.5*(high[i]+low[i]):
-                if rcorr[i]>0:
-                    signal[i] = 1
-                else:
-                    signal[i] = -1
         return signal
