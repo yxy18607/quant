@@ -10,15 +10,17 @@ class timing4(Beta):
         super().__init__(cfg)
         
     def generate_beta(self, df):
-        window = 5
+        window = 6
         ret = (df['high']+df['low']-(df['close']+df['open'])).values
         signal = np.full(len(df), 0)
         for i in range(window-1, len(df)):
             subret = ret[i-window+1:i+1]
             upret = subret[subret>0].mean() if len(subret[subret>0])>0 else 1e-4
             dnret = np.abs(subret[subret<0]).mean() if len(subret[subret<0])>0 else 1e-4
-            if np.sum(ret[i-2:i+1])>=0 and upret/dnret>=1:
+            if ret[i]>=0 and upret/dnret>=1:
                 signal[i] = 1
-            if np.sum(ret[i-2:i+1])<0 and upret/dnret<1:
+            elif ret[i-1:i+1].sum()>0:
+                signal[i] = 1
+            else:
                 signal[i] = -1
         return signal
