@@ -12,4 +12,5 @@ class timing5(Beta):
     def generate_signal(self):
         factor1 = pd.read_pickle('./dump/timing1.pkl')
         factor2 = pd.read_pickle('./dump/timing2.pkl')
-        self.signal_df = (factor1+factor2)/2
+        factor3 = pd.read_pickle('./dump/timing4.pkl')
+        self.signal_df = (factor1+factor2+factor3)/3
