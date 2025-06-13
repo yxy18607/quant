@@ -3,6 +3,9 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import polars as pl
+from tqdm import tqdm
+from datetime import datetime
 
 MAX_INSTS = 10000
 
@@ -164,14 +167,16 @@ class Beta:
 
     startdate       str             信号计算起始日
     enddate         str             信号计算终止日
-    信号计算默认多回溯60天数据, 防止出现前几个交易日无信号的情况
+    信号计算默认多回溯120天数据, 防止出现前几个交易日无信号的情况
+    output: 
+    self.beta - betaname_r.pkl 因子原始值
+    self.df_signal - betaname.pkl 因子仓位值
     """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
-        self.combo = cfg.get('combo') # bool
         self.calendar = pd.read_pickle('./data/calendar.pkl')
-        _startdate = self.calendar.searchsorted(self.startdate, 'left')-60
+        _startdate = self.calendar.searchsorted(self.startdate, 'left')-120
         _enddate = self.calendar.searchsorted(self.enddate, side='right')
         _mindate = self.calendar.searchsorted('20140101', 'left')
 
@@ -179,18 +184,28 @@ class Beta:
         self.signal_df = pd.DataFrame()
         
     def hf_to_daily(self):
-        self.daily_df = pd.DataFrame()
-        for didx in self.dateindex:
-            daily = self.generate_daily(didx)
-            self.daily_df.loc[didx] = daily
+        daily_df = []
+        start = datetime.now()
+        pbar = tqdm(self.dateindex, unit='day')
+        for didx in pbar:
+            df_lazy = pl.scan_parquet(f'./stock_mbar/ashare_{didx}.parquet')
+            daily_lazy = self.generate_daily(df_lazy) # output: code, factor
+            daily_lazy = daily_lazy.with_columns(pl.lit(didx).alias('trade_date'))
+            daily_df.append(daily_lazy.collect())
+            pbar.set_description(f'executing on {didx[:-2]} | cost {str(datetime.now()-start).split('.')[0]}')
+        daily_df = pl.concat(daily_df).pivot(on='code', index='trade_date', values='factor').to_pandas().set_index('trade_date')
+        columns = pd.read_pickle('./data/close.pkl').columns
+        self.daily_df = daily_df.reindex(columns=columns)
 
-    def generate_daily(self, didx):
+    def generate_daily(self, df_lazy: pl.LazyFrame):
+        "UNIMPLEMENTED"
         pass
 
     def generate_signal(self):
         pass
 
     def dump(self):
+        self.beta.to_pickle(f'./dump/{self.__class__.__name__}_r.pkl')
         self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')
 
     
