@@ -10,17 +10,70 @@ from datetime import datetime, timedelta
 MAX_INSTS = 10000
 
 class BarDataLoader:
-    def __init__(self, parquet_path: str, calendar: pd.Series, start_date: str, load_unit: str='60m', load_num: int=10, ):
-        self.parquet_path = parquet_path
+    def __init__(self, calendar: pd.Series, startdate: str, load_unit: str='60m', load_num: int=10, ):
         self.calendar = calendar
-        self.start_date = start_date
+        self.startdate = startdate
         self.load_unit = load_unit
         self.load_num = load_num
+        self.start_time, self.end_time = self.time_itvs()
+        self.data_initialize()
 
+    def time_itvs(self):
+        start_time = []; end_time = []
+        start = '09:30'
+        period = self.load_unit
+        ts1 = start
+        while ts1<'15:00':
+            start_time.append(ts1)
+            ts2 = datetime.strptime(ts1, '%H:%M')+timedelta(minutes=int(period[:-1])-1)
+            if ts1 == '09:30':
+                ts2 += timedelta(minutes=1)
+            end_time.append(ts2.strftime('%H:%M'))
+            ts1 = (ts2+timedelta(minutes=1)).strftime('%H:%M')
+            if ts1 == '11:31':
+                ts1 = '13:01'
+        return start_time, end_time
     
-        
+    def get_offset_trd(self, date, offset):
+        return self.calendar[np.maximum(self.calendar.searchsorted(date)+offset, 0)]
 
-        
+    def data_initialize(self):
+        MAX_DATES = int(np.ceil(self.load_num/(240/int(self.load_unit[:-1]))))
+        date = self.get_offset_trd(self.startdate, -MAX_DATES)
+        self.dlf = {}
+        while date < self.startdate:
+            self.dlf[date] = pl.scan_parquet(f'./etf_mbar/etf_{date}.parquet')
+            date = self.get_offset_trd(date, 1)
+        self.rlf = []; self.rret = []
+        for dt, lf in self.dlf.items():
+            for start, end in zip(self.start_time, self.end_time):
+                t1 = datetime.strptime(start, '%H:%M').time()
+                t2 = datetime.strptime(end, '%H:%M').time()
+                new_lf = lf.filter((pl.col('time_id').dt.time()>=t1)&(pl.col('time_id').dt.time()<=t2))
+                self.rlf.append(new_lf)
+                self.rret.append(new_lf
+                                 .group_by('code').agg((pl.col('close').cast(pl.Float64).last()/pl.col('pre').cast(pl.Float64).first()-1).alias('ret'))
+                                 .with_columns(pl.lit(datetime.strptime(f'{dt} {end}', "%Y%m%d %H:%M")).alias('datetime'))
+                                 .collect()
+                                 )
+                if len(self.rlf)>self.load_num:
+                    self.rlf.pop(0)
+    
+    def data_update(self, didx, start, end):
+        if self.start_time.index(start) == 0:
+            # 当日开始滚动时, 更新交易日
+            self.dlf[didx] = pl.scan_parquet(f'./etf_mbar/etf_{didx}.parquet')
+            self.dlf.pop(list(self.dlf.keys())[0])
+        t1 = datetime.strptime(start, '%H:%M').time()
+        t2 = datetime.strptime(end, '%H:%M').time()
+        new_lf = self.dlf[didx].filter((pl.col('time_id').dt.time()>=t1)&(pl.col('time_id').dt.time()<=t2))
+        self.rlf.append(new_lf)
+        self.rlf.pop(0)
+        self.rret.append(new_lf
+                         .group_by('code').agg((pl.col('close').cast(pl.Float64).last()/pl.col('pre').cast(pl.Float64).first()-1).alias('ret'))
+                         .with_columns(pl.lit(datetime.strptime(f'{didx} {end}', "%Y%m%d %H:%M")).alias('datetime'))
+                         .collect()
+                         )
 
 class BackTest:
     """
@@ -40,7 +93,6 @@ class BackTest:
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
         self.signal_id = cfg.get('signal_id')
-        self.mode = cfg.get('mode') # 1: long-only 2: short-only 0: long-short
 
         self.calendar = pd.read_pickle('./data/calendar.pkl')
         self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
@@ -59,97 +111,48 @@ class BackTest:
         # self.limit_state = self.limit == self.open
         # self.stop_state = self.stopping == self.open
 
-        self.get_valid()
-        
         self.fee = cfg.get('fee') if cfg.get('fee') is not None else 0
         print(f'------------------------backtesting {self.signal_id}-----------------------')
 
-    def time_itvs(self):
-        start_time = []; end_time = []
-        start = '09:30'
-        period = self.load_unit
-        ts1 = start
-        while ts1<'15:00':
-            start_time.append(ts1)
-            ts2 = datetime.strptime(ts1, '%H:%M')+timedelta(minutes=int(period[:-1])-1)
-            if ts1 == '09:30':
-                ts2 += timedelta(minutes=1)
-            end_time.append(ts2.strftime('%H:%M'))
-            ts1 = (ts2+timedelta(minutes=1)).strftime('%H:%M')
-            if ts1 == '11:31':
-                ts1 = '13:01'
-        return start_time, end_time
-
-    def get_offset_trd(self, date, offset):
-        return self.calendar[np.maximum(self.calendar.searchsorted(date)+offset, 0)]
-
-    def data_initialize(self):
-        MAX_DATES = int(np.ceil(self.load_num/(240/int(self.load_unit[:-1]))))+1
-        date = self.get_offset_trd(self.startdate, -MAX_DATES)
-        self.lf = {}
-        while date != self.startdate:
-            self.lf[date] = pl.scan_parquet(f'./etf_mbar/etf_{date}.parquet')
-            date = self.get_offset_trd(date, 1)
-        start_time, end_time = self.time_itvs()
-        self.rolling_lf = []; self.itv_rets = []
-        for dt, lf in self.lf.items():
-            for start, end in zip(start_time, end_time):
-                start = datetime.strptime(start, '%H:%M').time()
-                end = datetime.strptime(end, '%H:%M').time()
-                new_lf = lf.filter((pl.col('datetime').dt.time()>=start)&(pl.col('datetime').dt.time()<=end))
-                self.rolling_lf.append(new_lf)
-                self.itv_rets.append(new_lf.group_by('code').agg((pl.col('close').last()/pl.col('pre').first()-1).alias('ret')))
-                if len(self.rolling_lf)>self.load_num:
-                    self.rolling_lf.pop(0)
-    
-    def data_update(self, didx, start, end):
-        new_lf = self.lf[didx].filter((pl.col('datetime').dt.time()>=start)&(pl.col('datetime').dt.time()<=end))
-        self.rolling_lf.append(new_lf)
-        self.rolling_lf.pop(0)
-        self.itv_rets.append(new_lf.group_by('code').agg((pl.col('close').last()/pl.col('pre').first()-1).alias('ret')))
-    
     def test(self):
-        start_time, end_time = self.time_itvs()
-        factors = []; rets = []
+        dl = BarDataLoader(calendar=self.calendar,
+                           startdate=self.startdate,
+                           load_unit=self.load_unit,
+                           load_num=self.load_num)
+        start_time, end_time = dl.start_time, dl.end_time
+        factors = []
         for didx in self.dateindex:
             for start, end in zip(start_time, end_time):
-                itv_lf = pl.concat(self.rolling_lf)
-                factors.append(self.calculate_factor(itv_lf).collect()) # 截止start前一时刻的信号
-                if start_time.index(start) == 0:
-                    # 当日开始滚动, 需读取当日数据, 并剔除最旧日数据
-                    self.lf[didx] = pl.scan_parquet(f'./etf_mbar/etf_{didx}.parquet')
-                    self.lf.pop(list(self.lf.keys())[0])
-                self.data_update(didx, start, end)
+                rlf = pl.concat(dl.rlf)
+                factors.append(self.calculate_factor(rlf)
+                               .with_columns(pl.lit(datetime.strptime(f'{didx} {end}', "%Y%m%d %H:%M")).alias('datetime'))
+                               .collect()
+                               ) # 截止start前一时刻的信号
+                dl.data_update(didx, start, end)
+        self.factor = pl.concat(factors)
+        self.ret = pl.concat(dl.rret)
 
-    def calculate_factor(self, itv_lf):
+    def calculate_factor(self, rlf):
         pass
 
-    def get_position(self):
-        self.pos_df = self.signal_df.shift(1) # 收盘发信号，次日开盘生成仓位
-        # 涨停无法买入、跌停无法卖出、停牌无法交易
-        limit_pos = self.limit_state & (self.pos_df.diff()>0)
-        stop_pos = self.stop_state & (self.pos_df.diff()<0)
-        self.pos_df[limit_pos|stop_pos|self.suspend] = np.nan
-        self.pos_df.where(~(limit_pos|stop_pos|self.suspend), self.pos_df.ffill(), inplace=True)
-        self.pos_df = self.pos_df.shift(1) # T+2获得持仓收益
+    def factor_to_position(self):
+        pass
 
-        if self.mode == 1:
-            self.pos_df = np.maximum(0, self.pos_df)
-        elif self.mode == 2:
-            self.pos_df = np.minimum(0, self.pos_df)
-
-        self.dpos_df = self.pos_df.fillna(0).diff() # 计算调仓幅度需剔除nan的影响
-        self.dpos_df[self.pos_df.isna()] = np.nan
-        self.returns = self.open.pct_change(fill_method=None).fillna(0)
-
-    def generate_pnl(self):
-        pnl = self.pos_df.mul(self.returns)
-        pnl = pnl - self.dpos_df.abs() * self.fee
-        pnl = pnl.mean(1)
-        self.pnl = pd.DataFrame({'pnl': pnl, 'nav': pnl.cumsum()})
+    def get_pnl(self):
+        self.pos_hf = self.factor_to_position()
+        self.pnl_hf = self.pos_hf.join(self.ret, on=['code', 'datetime'], how='inner').with_columns([
+            pl.col('datetime').dt.date().alias('date'),
+            pl.col('factor').diff().abs().over('code').alias('dfactor'),
+            (pl.col('factor')*pl.col('ret')-pl.col('dfactor')*self.fee).alias('pnl')])
+        self.pnl_d = self.pnl_hf.group_by(['date', 'code']).agg(
+            [pl.col('pnl').sum(),
+             pl.col('dfactor').sum()])
+        self.pnl = self.pnl_d.group_by('date').agg([pl.col('pnl').mean(), pl.col('dfactor').mean()]).with_columns(
+            pl.col('pnl').cum_sum().alias('nav')
+        )
 
     def stats(self):
-        self.pnl['year'] = self.pnl.index.str[:4]
+        self.pnl = self.pnl.with_columns(pl.col('date').dt.year().alias('year'))
         # total
         ret = self.pnl['pnl'].mean() * 250
         sp = self.pnl['pnl'].mean() / self.pnl['pnl'].std() * np.sqrt(250)
