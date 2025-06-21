@@ -15,6 +15,7 @@ cfg = {'startdate': '20230601',
        'mode': 0
        }
 
+# pd.set_option('display.max_rows', None)
 backtest = DailyCTA(cfg)
 backtest()
 # backtest.get_pnl()

@@ -4,15 +4,14 @@ import importlib
 import os
 
 # alpha_list = [f[:-3] for f in os.listdir('./alpha') if f.startswith('alpha') and f.endswith('.py')]
-# alpha_list = ['alpha1', 'alpha2', 'alpha3']
-alpha_list = ['alpha5']
+alpha_list = ['alpha1', 'alpha2', 'alpha3', 'alphac']
+# alpha_list = ['alphac']
 
 # mode:0——重写，1——更新
 mode = 0
 
 cfg = {'startdate': '20180101',
-       'enddate': '20250331',
-       'combo': True
+       'enddate': '20250516',
        }
 
 for alpha_file in alpha_list:
