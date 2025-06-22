@@ -42,7 +42,7 @@ class BarDataLoader:
         date = self.get_offset_trd(self.startdate, -MAX_DATES)
         self.dlf = {}
         while date < self.startdate:
-            self.dlf[date] = pl.scan_parquet(f'./etf_mbar/etf_{date}.parquet')
+            self.dlf[date] = pl.scan_parquet(f'./stock_mbar/ashare_{date}.parquet')
             date = self.get_offset_trd(date, 1)
         self.rlf = []; self.rret = []
         for dt, lf in self.dlf.items():
@@ -62,7 +62,7 @@ class BarDataLoader:
     def data_update(self, didx, start, end):
         if self.start_time.index(start) == 0:
             # 当日开始滚动时, 更新交易日
-            self.dlf[didx] = pl.scan_parquet(f'./etf_mbar/etf_{didx}.parquet')
+            self.dlf[didx] = pl.scan_parquet(f'./stock_mbar/ashare_{didx}.parquet')
             self.dlf.pop(list(self.dlf.keys())[0])
         t1 = datetime.strptime(start, '%H:%M').time()
         t2 = datetime.strptime(end, '%H:%M').time()
@@ -114,7 +114,7 @@ class BackTest:
         self.fee = cfg.get('fee') if cfg.get('fee') is not None else 0
         print(f'------------------------backtesting {self.signal_id}-----------------------')
 
-    def test(self):
+    def backward(self):
         dl = BarDataLoader(calendar=self.calendar,
                            startdate=self.startdate,
                            load_unit=self.load_unit,
@@ -140,34 +140,36 @@ class BackTest:
 
     def get_pnl(self):
         self.pos_hf = self.factor_to_position()
-        self.pnl_hf = self.pos_hf.join(self.ret, on=['code', 'datetime'], how='inner').with_columns([
+        self.pnl_hf = self.pos_hf.join(self.ret, on=['code', 'datetime'], how='inner').with_columns(
+            pl.col('pos').fill_null(strategy='forward').alias('pos')
+            ).with_columns([
             pl.col('datetime').dt.date().alias('date'),
-            pl.col('factor').diff().abs().over('code').alias('dfactor'),
-            (pl.col('factor')*pl.col('ret')-pl.col('dfactor')*self.fee).alias('pnl')])
+            pl.col('pos').diff().abs().over('code').alias('dpos')]).with_columns(
+            (pl.col('pos')*pl.col('ret')-pl.col('dpos')*self.fee).alias('pnl'))
         self.pnl_d = self.pnl_hf.group_by(['date', 'code']).agg(
             [pl.col('pnl').sum(),
-             pl.col('dfactor').sum()])
-        self.pnl = self.pnl_d.group_by('date').agg([pl.col('pnl').mean(), pl.col('dfactor').mean()]).with_columns(
+             pl.col('dpos').sum()]).sort(['date'])
+        self.pnl = self.pnl_d.group_by('date').agg([pl.col('pnl').mean(), pl.col('dpos').mean()]).with_columns(
             pl.col('pnl').cum_sum().alias('nav')
         )
 
     def stats(self):
-        self.pnl = self.pnl.with_columns(pl.col('date').dt.year().alias('year'))
+        self.pnl_pd = self.pnl.with_columns(pl.col('date').dt.year().alias('year')).to_pandas().set_index('date')
         # total
-        ret = self.pnl['pnl'].mean() * 250
-        sp = self.pnl['pnl'].mean() / self.pnl['pnl'].std() * np.sqrt(250)
-        self.pnl['dd_T'] = self.pnl['nav'].cummax() - self.pnl['nav']
-        mdd = self.pnl['dd_T'].max()
-        dd_end = self.pnl['dd_T'].idxmax()
-        dd_start = self.pnl.loc[:dd_end, 'nav'].idxmax()
-        winr = (self.pnl['pnl']>0).mean()
-        odd = -self.pnl.loc[self.pnl['pnl']>0, 'pnl'].mean() / self.pnl.loc[self.pnl['pnl']<0, 'pnl'].mean() 
+        ret = self.pnl_pd['pnl'].mean() * 250
+        sp = self.pnl_pd['pnl'].mean() / self.pnl_pd['pnl'].std() * np.sqrt(250)
+        self.pnl_pd['dd_T'] = self.pnl_pd['nav'].cummax() - self.pnl_pd['nav']
+        mdd = self.pnl_pd['dd_T'].max()
+        dd_end = self.pnl_pd['dd_T'].idxmax()
+        dd_start = self.pnl_pd.loc[:dd_end, 'nav'].idxmax()
+        winr = (self.pnl_pd['pnl']>0).mean()
+        odd = -self.pnl_pd.loc[self.pnl_pd['pnl']>0, 'pnl'].mean() / self.pnl_pd.loc[self.pnl_pd['pnl']<0, 'pnl'].mean() 
         calmar = ret / mdd
-        tvr = self.dpos_df.abs().mean(1).mean(0)*250
+        tvr = self.pnl_pd_pd['dpos'].mean()*250
 
         # yearly
-        gpnl = self.pnl.groupby('year')
-        self.pnl['dd_y'] = gpnl['nav'].cummax() - self.pnl['nav']
+        gpnl = self.pnl_pd.groupby('year')
+        self.pnl_pd['dd_y'] = gpnl['nav'].cummax() - self.pnl_pd['nav']
         ret_y = gpnl['pnl'].mean() * 250
         sp_y = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(250)
         mdd_y = gpnl['dd_y'].max()
@@ -176,7 +178,6 @@ class BackTest:
         winr_y = gpnl['pnl'].apply(lambda x: (x>0).mean())
         odd_y = -gpnl['pnl'].apply(lambda x: x[x>0].mean() / x[x<0].mean())
         calmar_y = ret_y / mdd_y
-        self.pnl['dpos'] = self.dpos_df.abs().mean(1)
         tvr_y = gpnl['dpos'].mean() * 250
 
         index1 = gpnl.head(1).index
@@ -195,7 +196,7 @@ class BackTest:
 
     def plot_curve(self, os_startdate:str=None):
         benchmark = self.returns.mean(1).cumsum()
-        plot_df = pd.DataFrame({'strategy': self.pnl['nav'], 'benchmark': benchmark})
+        plot_df = pd.DataFrame({'strategy': self.pnl_pd['nav'], 'benchmark': benchmark})
         plot_df.index = pd.to_datetime(plot_df.index)
         if not os_startdate:
             plot_df.plot()
@@ -210,7 +211,7 @@ class BackTest:
         plt.show()
 
     def save_pnl(self):
-        self.pnl['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+        self.pnl_pd['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
 class Beta:
     """

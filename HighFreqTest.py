@@ -1,18 +1,20 @@
 import numpy as np
 import pandas as pd
-from HighFreqModules import BackTest
+
+signal_id = 'hfetf'
+exec(f'from beta.{signal_id} import {signal_id}')
 
 cfg = {'startdate': '20180101',
-       'enddate': '20181231',
-       'signal_id': 'hfetf',
-       # 'signal_id': 'stocktiming6',
+       'enddate': '20230530',
+       'signal_id': signal_id,
        'fee': 0,
        'load_unit': '60m',
-       'load_num': 10
+       'load_num': 20
        }
 
-backtest = BackTest(cfg)
-backtest.test()
+backtest = eval(f'{signal_id}(cfg)')
+backtest.backward()
+backtest.get_pnl()
 # backtest.get_pnl()
 # backtest.profit_ana()
 # backtest.plot_curve()
