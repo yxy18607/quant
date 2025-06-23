@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from BetaModules import DailyCTA
 
-cfg = {'startdate': '20200801',
+cfg = {'startdate': '20230601',
        'enddate': '20250531',
        'signal_id': 'timing5',
        'zone': 'hk',
@@ -20,6 +20,6 @@ backtest = DailyCTA(cfg)
 backtest()
 # backtest.get_pnl()
 # backtest.profit_ana()
-backtest.plot_curve(os_startdate='20230601')
-# backtest.plot_curve()
+# backtest.plot_curve(os_startdate='20230601')
+backtest.plot_curve()
 # backtest.save_pnl()
