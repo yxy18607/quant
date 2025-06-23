@@ -4,15 +4,15 @@ from BetaModules import DailyCTA
 
 cfg = {'startdate': '20230601',
        'enddate': '20250531',
-       'signal_id': 'timing5',
+       # 'signal_id': 'timing5',
+       'signal_id': 'hktiming',
        'zone': 'hk',
        'trade_price': 'open',
        'slippage': 1,
-       'fee': 0.0003,
+       'fee': 0.000023,
        # 'instruments': ['zz1000'],
-       'instruments': {'zz1000': 'hstech'},
-       'mode': 0,
-       # 'period': 'M'
+       'instruments': ['hsi'],
+       'mode': 0
        }
 
 # pd.set_option('display.max_rows', None)
