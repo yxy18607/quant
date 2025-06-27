@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 from tqdm import tqdm
 from datetime import datetime, timedelta
+import os
 
 MAX_INSTS = 10000
 
@@ -42,7 +43,7 @@ class BarDataLoader:
         date = self.get_offset_trd(self.startdate, -MAX_DATES)
         self.dlf = {}
         while date < self.startdate:
-            self.dlf[date] = pl.scan_parquet(f'./stock_mbar/ashare_{date}.parquet')
+            self.dlf[date] = pl.scan_parquet(f'./etf_mbar/etf_{date}.parquet')
             date = self.get_offset_trd(date, 1)
         self.rlf = []; self.rret = []
         for dt, lf in self.dlf.items():
@@ -62,7 +63,7 @@ class BarDataLoader:
     def data_update(self, didx, start, end):
         if self.start_time.index(start) == 0:
             # 当日开始滚动时, 更新交易日
-            self.dlf[didx] = pl.scan_parquet(f'./stock_mbar/ashare_{didx}.parquet')
+            self.dlf[didx] = pl.scan_parquet(f'./etf_mbar/etf_{didx}.parquet')
             self.dlf.pop(list(self.dlf.keys())[0])
         t1 = datetime.strptime(start, '%H:%M').time()
         t2 = datetime.strptime(end, '%H:%M').time()
@@ -78,7 +79,7 @@ class BarDataLoader:
 class BackTest:
     """
     cfg参数配置说明
-    -----------------------------------------------------
+    ----------------------------------------------------
     key             value           comment
 
     startdate       str             回测起始日
@@ -121,25 +122,28 @@ class BackTest:
                            load_num=self.load_num)
         start_time, end_time = dl.start_time, dl.end_time
         factors = []
-        for didx in self.dateindex:
+        pbar = tqdm(self.dateindex)
+        for didx in pbar:
+            pbar.set_description(f'calculating {didx}: ')
             for start, end in zip(start_time, end_time):
-                rlf = pl.concat(dl.rlf)
+                rlf = pl.concat(dl.rlf).filter(pl.col('time_id')<pl.col('time_id').max()) # 保证信号可交易性, 提前一分钟发信号
                 factors.append(self.calculate_factor(rlf)
                                .with_columns(pl.lit(datetime.strptime(f'{didx} {end}', "%Y%m%d %H:%M")).alias('datetime'))
+                               .select(['code', 'datetime', 'factor'])
                                .collect()
                                ) # 截止start前一时刻的信号
                 dl.data_update(didx, start, end)
-        self.factor = pl.concat(factors)
+        self.factor = pl.concat(factors).with_columns(pl.col('factor').fill_nan(None).alias('factor'))
         self.ret = pl.concat(dl.rret)
 
-    def calculate_factor(self, rlf):
+    def calculate_factor(self, rlf: pl.LazyFrame):
         pass
 
     def factor_to_position(self):
         pass
 
     def get_pnl(self):
-        self.pos_hf = self.factor_to_position()
+        self.pos_hf = self.factor_to_position().select(['code', 'datetime', 'factor', pl.col('pos').fill_nan(None)])
         self.pnl_hf = self.pos_hf.join(self.ret, on=['code', 'datetime'], how='inner').with_columns(
             pl.col('pos').fill_null(strategy='forward').alias('pos')
             ).with_columns([
@@ -152,6 +156,10 @@ class BackTest:
         self.pnl = self.pnl_d.group_by('date').agg([pl.col('pnl').mean(), pl.col('dpos').mean()]).with_columns(
             pl.col('pnl').cum_sum().alias('nav')
         )
+        try:
+            self.pos_hf.write_ipc(f'./dump/{self.signal_id}.feather')
+        except OSError:
+            print('写入feather失败, 请确认是否已经存在内存映射.')
 
     def stats(self):
         self.pnl_pd = self.pnl.with_columns(pl.col('date').dt.year().alias('year')).to_pandas().set_index('date')
@@ -165,7 +173,7 @@ class BackTest:
         winr = (self.pnl_pd['pnl']>0).mean()
         odd = -self.pnl_pd.loc[self.pnl_pd['pnl']>0, 'pnl'].mean() / self.pnl_pd.loc[self.pnl_pd['pnl']<0, 'pnl'].mean() 
         calmar = ret / mdd
-        tvr = self.pnl_pd_pd['dpos'].mean()*250
+        tvr = self.pnl_pd['dpos'].mean()*250
 
         # yearly
         gpnl = self.pnl_pd.groupby('year')
@@ -195,9 +203,9 @@ class BackTest:
         print(out)
 
     def plot_curve(self, os_startdate:str=None):
-        benchmark = self.returns.mean(1).cumsum()
-        plot_df = pd.DataFrame({'strategy': self.pnl_pd['nav'], 'benchmark': benchmark})
-        plot_df.index = pd.to_datetime(plot_df.index)
+        self.ret_d = self.pnl_hf.group_by(['date', 'code']).agg(pl.col('ret').sum().alias('daily_ret')).group_by('date').agg(pl.col('daily_ret').mean())
+        benchmark = self.ret_d.select(pl.col('daily_ret').cum_sum()).to_pandas()['daily_ret']
+        plot_df = pd.DataFrame({'strategy': self.pnl_pd['nav'], 'benchmark': benchmark.values})
         if not os_startdate:
             plot_df.plot()
         else:
@@ -212,54 +220,3 @@ class BackTest:
 
     def save_pnl(self):
         self.pnl_pd['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
-
-class Beta:
-    """
-    cfg参数配置说明
-    --------------------------------------------------
-    key             value           comment
-
-    startdate       str             信号计算起始日
-    enddate         str             信号计算终止日
-    信号计算默认多回溯120天数据, 防止出现前几个交易日无信号的情况
-    output: 
-    self.beta - betaname_r.pkl 因子原始值
-    self.df_signal - betaname.pkl 因子仓位值
-    """
-    def __init__(self, cfg):
-        self.startdate = cfg.get('startdate')
-        self.enddate = cfg.get('enddate')
-        self.calendar = pd.read_pickle('./data/calendar.pkl')
-        _startdate = self.calendar.searchsorted(self.startdate, 'left')-120
-        _enddate = self.calendar.searchsorted(self.enddate, side='right')
-        _mindate = self.calendar.searchsorted('20140101', 'left')
-
-        self.dateindex = self.calendar.iloc[np.maximum(_startdate, _mindate):_enddate]
-        self.signal_df = pd.DataFrame()
-        
-    def hf_to_daily(self):
-        daily_df = []
-        start = datetime.now()
-        pbar = tqdm(self.dateindex, unit='day')
-        for didx in pbar:
-            df_lazy = pl.scan_parquet(f'./stock_mbar/ashare_{didx}.parquet')
-            daily_lazy = self.generate_daily(df_lazy) # output: code, factor
-            daily_lazy = daily_lazy.with_columns(pl.lit(didx).alias('trade_date'))
-            daily_df.append(daily_lazy.collect())
-            pbar.set_description(f'executing on {didx[:-2]} | cost {str(datetime.now()-start).split('.')[0]}')
-        daily_df = pl.concat(daily_df).pivot(on='code', index='trade_date', values='factor').to_pandas().set_index('trade_date')
-        columns = pd.read_pickle('./data/close.pkl').columns
-        self.daily_df = daily_df.reindex(columns=columns)
-
-    def generate_daily(self, df_lazy: pl.LazyFrame):
-        "UNIMPLEMENTED"
-        pass
-
-    def generate_signal(self):
-        pass
-
-    def dump(self):
-        self.beta.to_pickle(f'./dump/{self.__class__.__name__}_r.pkl')
-        self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')
-
-    
