@@ -125,6 +125,12 @@ class DailyCTA:
         elif self.period == 'M':
             group_col = 'month'
             self.pnl[group_col] = self.pnl.index.str[:6]
+        elif self.period == 'H':
+            group_col = 'half'
+            self.pnl[group_col] = self.pnl.index.str[:4]+(self.pnl.index.str[4:6].astype(int)//7).astype(str)
+        elif self.period == 'Q':
+            group_col = 'quarter'
+            self.pnl[group_col] = self.pnl.index.str[:4]+((self.pnl.index.str[4:6].astype(int)-1)//3).astype(str)
         gpnl = self.pnl.groupby(group_col)
         self.pnl['dd_y'] = gpnl['nav'].cummax() - self.pnl['nav']
         ret_y = gpnl['pnl'].mean() * 250
