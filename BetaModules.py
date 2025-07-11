@@ -32,6 +32,7 @@ class DailyCTA:
         instruments = cfg.get('instruments')
         self.mode = cfg.get('mode')
         self.period = 'Y' if cfg.get('period') is None else cfg.get('period')
+        self.dump_pnl = cfg.get('dump_pnl') if cfg.get('dump_pnl') is not None else True
 
         calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
         self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl')
@@ -180,8 +181,8 @@ class DailyCTA:
         plt.legend()
         plt.show()
 
-    def save_pnl(self):
-        self.pnl['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+        if self.dump_pnl:
+            self.pnl[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
 class Beta:
     """
