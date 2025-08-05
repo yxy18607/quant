@@ -111,6 +111,7 @@ class BackTest:
     mode                int             0-多空信号; 1-纯多头信号; 2-纯空头信号
     dump_factor         bool            True-缓存信号值; False-不缓存
     dump_pnl            bool            True-缓存pnl; False-不缓存
+    update              bool            True-更新策略数据; False-重写策略数据
     """
     def __init__(self, cfg):
         self.cfg = cfg
@@ -125,6 +126,7 @@ class BackTest:
 
         self.dump_factor = cfg.get('dump_factor') if cfg.get('dump_factor') is not None else True
         self.dump_pnl = cfg.get('dump_pnl') if cfg.get('dump_pnl') is not None else True
+        self.update = cfg.get('update') if cfg.get('update') is not None else False
 
         self.calendar = pd.read_pickle('./data/calendar.pkl')
         self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
@@ -200,7 +202,12 @@ class BackTest:
 
         if self.dump_factor:
             try:
-                self.pos_hf.write_ipc(f'./dump/{self.signal_id}.feather')
+                if not self.update:
+                    self.pos_hf.write_ipc(f'./dump/{self.signal_id}.feather')
+                else:
+                    old_pos_hf = pl.read_ipc(f'./dump/{self.signal_id}.feather')
+                    new_pos_hf = self.pos_hf.filter(pl.col('datetime')>old_pos_hf.select(pl.col('datetime').max()))
+                    pl.concat([old_pos_hf, new_pos_hf]).write_ipc(f'./dump/{self.signal_id}.feather')
             except OSError:
                 print('写入feather失败, 请确认是否已经存在内存映射.')
 
@@ -246,7 +253,12 @@ class BackTest:
         print(out)
 
         if self.dump_pnl:
-            self.pnl_pd[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+            if not self.update:
+                self.pnl_pd[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+            else:
+                old_pnl_pd = pd.read_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+                new_pnl_pd = self.pnl_pd[['pnl', 'dpos']].loc[self.pnl_pd.index>old_pnl_pd.index[-1]]
+                pd.concat([old_pnl_pd, new_pnl_pd], axis=0).to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
     def plot_curve(self, os_startdate:str=None):
         self.ret_d = self.pnl_hf.group_by(['date', 'code']).agg(pl.col('ret').sum().alias('daily_ret')).group_by('date').agg(pl.col('daily_ret').mean())
@@ -263,3 +275,18 @@ class BackTest:
             ax.axvline(pd.to_datetime(os_startdate), color="black", linestyle="--")  # 添加分割线
         plt.legend()
         plt.show()
+        
+    def stats_bycode(self):
+        tot = (self.pnl_d
+               .with_columns(pl.col('pnl').cum_sum().over('code').alias('nav'))
+               .with_columns((pl.col('nav').cum_max().over('code')-pl.col('nav')).alias('dd'))
+               .group_by('code').agg([(pl.col('pnl').mean()*250).alias('ret'),
+                                      (pl.col('pnl').mean()/pl.col('pnl').std()*np.sqrt(250)).alias('sp'),
+                                      pl.col('dd').max().alias('max_dd'),
+                                    #   pl.col('date').row(pl.col('dd').arg_max()).alias('dd_end'),
+                                    #   pl.col('date').slice(0, pl.col('dd').arg_max()).row(pl.col('nav').slice(0, pl.col('dd').arg_max()).arg_max()).alias('dd_start'),
+                                      (pl.col('dpos').mean()*250).alias('anntvr'),
+                                      (pl.col('pnl')>0).mean().alias('winr'),
+                                      (-pl.col('pnl').filter(pl.col('pnl')>0).mean()/pl.col('pnl').filter(pl.col('pnl')<0).mean()).alias('odd')])
+                .with_columns((pl.col('ret')/pl.col('max_dd')).alias('calmar')))
+        tot.select(['code', 'ret', 'sp', 'max_dd', 'anntvr', 'winr', 'odd', 'calmar']).write_ipc(f'./pnl/{self.signal_id}.stats.feather')
