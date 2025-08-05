@@ -10,13 +10,14 @@ from HighFreqModules import BackTest
 class hfetf(BackTest):
     def __init__(self, cfg):
         super().__init__(cfg)
+        self.load_num = 20
+        self.load_agg = True
     
     def calculate_factor(self, rlf):
-        return rlf.group_by('code').agg(pl.col('close').cast(pl.Float64).std().alias('factor'))
+        return (rlf
+                .group_by('code').agg(-(pl.col('close')/pl.col('pre')-1).mean().alias('factor'))
+                )
     
     def factor_to_position(self):
-        return self.factor.with_columns([pl.col('factor').over('code').rolling_max(20).alias('fmax'),
-                                         pl.col('factor').over('code').rolling_min(20).alias('fmin')]).with_columns(
-                                         ((pl.col('factor')-pl.col('fmin'))/(pl.col('fmax')-pl.col('fmin'))).alias('pos')).select(
-                                             [pl.col('code'), pl.col('datetime'), pl.col('factor'), pl.col('pos')]
-                                         )
+        return fr.pl_minmax_scalar(self.factor, 20)
+        # return self.factor.with_columns(pl.col('factor').alias('pos'))
