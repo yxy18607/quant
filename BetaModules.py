@@ -20,6 +20,7 @@ class DailyCTA:
     instruments     list, dict      回测的交易品种列表, list-发信号和交易的品种一一对应, dict-发信号和交易的是不同的品种, 由key和value确定对应关系
     mode            int             0-多空信号; 1-纯多头信号; 2-纯空头信号
     period          str             绩效统计周期, Y-yearly; M-monthly, 默认Y
+    dump_pnl        bool            True-缓存pnl; False-不缓存
     """
     def __init__(self, cfg):
         self.startdate = cfg.get('startdate')
@@ -48,8 +49,13 @@ class DailyCTA:
         self.stat()
     
     def check_calendar(self, calendar):
+        if self.trade_price in ['open', 'vwap']:
+            offset = 3
+        elif self.trade_price == 'close':
+            offset = 2
+        startdate = calendar.iloc[calendar.searchsorted(self.startdate, 'left')-offset]
         dateindex = self.df_signal.index.intersection(calendar)
-        self.dateindex = pd.Series(dateindex[(dateindex>=self.startdate)&(dateindex<=self.enddate)])
+        self.dateindex = pd.Series(dateindex[(dateindex>=startdate)&(dateindex<=self.enddate)])
     
     def trading_insts(self, instruments):
         if isinstance(instruments, dict):
@@ -100,9 +106,15 @@ class DailyCTA:
             pnl[inst] = df['returns'] * self.pos[inst]
             pnl[inst] = pnl[inst] - self.pos[inst].diff(1).abs() * (self.fee + self.slippage / df['close'])
         pnl = pnl.mean(1)
-        self.pnl = pd.DataFrame({'pnl': pnl, 'nav': pnl.cumsum()})
+        self.pnl = pd.DataFrame({'pnl': pnl,
+                                 'if_trade': self.pos.diff().fillna(0).any(axis=1).astype(int),
+                                 'if_hold': self.pos.any(axis=1),
+                                 'dpos': self.pos.diff(1).abs().mean(1)})
+        self.pnl['trade_id'] = self.pnl['if_trade'].cumsum()
 
     def stat(self):
+        self.pnl = self.pnl[self.pnl.index>=self.startdate]
+        self.pnl['nav'] = self.pnl['pnl'].cumsum()
         # total
         ret = self.pnl['pnl'].mean() * 250
         sp = self.pnl['pnl'].mean() / self.pnl['pnl'].std() * np.sqrt(250)
@@ -110,14 +122,12 @@ class DailyCTA:
         mdd = self.pnl['dd_T'].max()
         dd_end = self.pnl['dd_T'].idxmax()
         dd_start = self.pnl.loc[:dd_end, 'nav'].idxmax()
-        self.pnl['if_trade'] = self.pos.diff().fillna(0).any(axis=1).astype(int)
-        self.pnl['trade_id'] = self.pnl['if_trade'].cumsum()
-        self.pnl['if_hold'] = self.pos.any(axis=1)
+        dd_duration = np.bincount(self.pnl['nav'].cummax().diff(1).astype(bool).cumsum()).max()
         pnl_byid = self.pnl.loc[self.pnl['if_hold']].groupby('trade_id')['pnl'].sum()
         winr = (pnl_byid>0).mean()
         odd = -pnl_byid[pnl_byid>0].mean() / pnl_byid[pnl_byid<0].mean()
         calmar = ret / mdd
-        tvr = self.pos.diff(1).abs().mean(1).mean(0)*250
+        tvr = self.pnl['dpos'].mean(0)*250
 
         # by period
         if self.period == 'Y':
@@ -139,12 +149,12 @@ class DailyCTA:
         mdd_y = gpnl['dd_y'].max()
         dd_end_y = gpnl['dd_y'].idxmax()
         dd_start_y = gpnl.apply(lambda x: x.loc[:dd_end_y[x[group_col].values[0]], 'nav'].idxmax())
+        dd_duration_y = gpnl['nav'].apply(lambda g: np.bincount(g.cummax().diff(1).astype(bool).cumsum()).max())
         pnl_byid_y = self.pnl.loc[self.pnl['if_hold']].groupby(['trade_id', group_col])['pnl'].sum()
         gpnl_byid_y = pnl_byid_y.groupby(level=group_col)
         winr_y = gpnl_byid_y.apply(lambda x: (x>0).mean())
         odd_y = -gpnl_byid_y.apply(lambda x: x[x>0].mean() / x[x<0].mean())
         calmar_y = ret_y / mdd_y
-        self.pnl['dpos'] = self.pos.diff(1).abs().mean(1)
         tvr_y = gpnl['dpos'].mean() * 250
 
 
@@ -155,18 +165,22 @@ class DailyCTA:
                             'dd': mdd_y.values*100,
                             'dd_start': dd_start_y.values,
                             'dd_end': dd_end_y.values,
+                            'dd_duration': dd_duration_y.values,
                             'anntvr': tvr_y.values,
                             'winr': winr_y.values*100,
                             'odd': odd_y.values,
                             'calmar': calmar_y.values}, index=pd.MultiIndex.from_arrays([index1, index2], names=['from', 'to']))
-        out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, tvr, winr*100, odd, calmar]
+        out.loc[(self.pnl.index[0], self.pnl.index[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, dd_duration, tvr, winr*100, odd, calmar]
         print(out)
+
+        if self.dump_pnl:
+            self.pnl[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
     def plot_curve(self, os_startdate:str=None):
         benchmark = pd.DataFrame()
         for inst in self.data_dict.keys():
-            benchmark[inst] = self.data_dict[inst]['pct_change']/100
-        benchmark = benchmark.mean(1).cumsum()
+            benchmark[inst] = self.data_dict[inst]['returns']
+        benchmark = benchmark[benchmark.index>=self.startdate].mean(1).cumsum()
         plot_df = pd.DataFrame({'strategy': self.pnl['nav'], 'benchmark': benchmark})
         plot_df.index = pd.to_datetime(plot_df.index)
         if not os_startdate:
@@ -180,9 +194,6 @@ class DailyCTA:
             ax.axvline(pd.to_datetime(os_startdate), color="black", linestyle="--")  # 添加分割线
         plt.legend()
         plt.show()
-
-        if self.dump_pnl:
-            self.pnl[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
 class Beta:
     """

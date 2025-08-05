@@ -27,6 +27,7 @@ class BackTest:
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
         self.signal_id = cfg.get('signal_id')
+        self.instruments = cfg.get('instruments')
         self.mode = cfg.get('mode') # 1: long-only 2: short-only 0: long-short
 
         self.calendar = pd.read_pickle('./data/calendar.pkl')
@@ -61,6 +62,9 @@ class BackTest:
         bj = ~self.close.columns.str.contains('BJ')
         bj = pd.DataFrame(np.tile(bj, (len(self.close.index), 1)), index=self.close.index, columns=self.close.columns)
         valid = lp & st & rl & suspend & bj
+        if self.instruments is not None:
+            sub_insts = pd.read_pickle(f'./data/mb_{self.instruments}.pkl')
+            valid = valid & sub_insts
         self.valid = valid
         self.signal_df.where(valid, np.nan, inplace=True)
 
@@ -157,7 +161,7 @@ class BackTest:
         plt.show()
 
     def save_pnl(self):
-        self.pnl['pnl'].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+        self.pnl[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
 class Beta:
     """
