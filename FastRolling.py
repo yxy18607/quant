@@ -15,13 +15,19 @@ def ols_to_t(y: pd.DataFrame, window: int, coef_id: int):
     beta[window-1:] = b
     return pd.DataFrame(beta, index=y.index, columns=y.columns)
 
+def sma(y: pd.DataFrame, window: int):
+    return y.rolling(window).mean()
+
+def wma(y: pd.DataFrame, w: pd.DataFrame, window: int):
+    return (y*w).rolling(window).sum()/w.rolling(window).sum()
+
 def signal_minmax_scaler(y: pd.DataFrame, window: int):
     result = (y-y.rolling(window).min())/(y.rolling(window).max()-y.rolling(window).min())
     return result*2-1
 
 def signal_normalize(y: pd.DataFrame, window: int, clip_level: float=1):
     result = (y - y.rolling(window).mean()) / y.rolling(window).std()
-    return result.clip(-clip_level, clip_level)
+    return result.clip(-clip_level, clip_level)/clip_level
 
 def signal_uniform(y: pd.DataFrame, window: int):
     return y.rolling(window).rank(pct=True)*2-1
