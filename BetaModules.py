@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib
 # matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import polars as pl
 
 class DailyCTA:
     """
@@ -223,13 +224,28 @@ class Beta:
         signal_df = pd.DataFrame()
         for inst in self.instruments:
             df = pd.read_pickle(f'./data/{inst}.pkl').loc[self.dateindex]
+            if not self.pf_to_daily.__doc__ == 'UNIMPLEMENTED':
+                pf = (pl.scan_parquet(f'./idx_mbar/{inst}.parquet')
+                      .filter(pl.col('date_id').is_in(pl.Series(pd.to_datetime(self.dateindex).dt.date)))
+                    .with_columns([pl.col('close').cast(pl.Float64),
+                                    pl.col('open').cast(pl.Float64),
+                                    pl.col('high').cast(pl.Float64),
+                                    pl.col('low').cast(pl.Float64),
+                                    pl.col('pre').cast(pl.Float64),
+                                    pl.col('amount').cast(pl.Int64)]))
+                pf = self.pf_to_daily(pf).sort('date_id').collect().to_pandas().set_index('date_id')
+                pf.index = pf.index.strftime('%Y%m%d')
+                df = pd.concat([df, pf], axis=1, join='inner')
             signal = self.generate_beta(df)
             signal_df[inst] = signal
         signal_df.index = self.dateindex
         self.signal_df = signal_df
 
-    def generate_beta(self, df):
+    def generate_beta(self, df: pd.DataFrame):
         pass
+
+    def pf_to_daily(self, pf: pl.LazyFrame):
+        "UNIMPLEMENTED"
 
     def dump(self):
         self.signal_df.to_pickle(f'./dump/{self.__class__.__name__}.pkl')

@@ -23,6 +23,9 @@ class BackTest:
     NLRiskNeut      dict            NLRiskNeut参数
     FactorAna       dict            FactorAna参数
     GroupFactorAna  dict            GroupFactorAna参数
+    dump_pnl        bool            True-缓存pnl; False-不缓存
+    dump_rank       bool            True-缓存rank值; False-不缓存
+    update          bool            True-更新策略数据; False-重写策略数据
     """
     def __init__(self, cfg):
         self.cfg = cfg
@@ -55,6 +58,9 @@ class BackTest:
             valid_tvr_day = self.calendar_df.iloc[:, 1:].stack().unique()
             self.tvrindex = self.dateindex.iloc[self.dateindex.searchsorted(valid_tvr_day, side='left')] # 回测期内所有定点调仓日
 
+        self.dump_pnl = cfg.get('dump_pnl') if cfg.get('dump_pnl') is not None else True
+        self.dump_rank = cfg.get('dump_rank') if cfg.get('dump_rank') is not None else True
+        self.update = cfg.get('update') if cfg.get('update') is not None else False
         print(f'------------------------backtesting {self.alpha_id}-----------------------')
     
     def get_offset_trd(self, date, offset):
@@ -214,6 +220,14 @@ class BackTest:
             self.pos_df = pos_df
         self.wgt_df = self.pos_df.div(self.pos_df.abs().sum(1), axis=0)
 
+        if self.dump_rank:
+            if not self.update:
+                self.alpha_rk.to_pickle(f"./dump/{self.alpha_id}_v2.pkl")
+            else:
+                old_rk = pd.read_pickle(f"./dump/{self.alpha_id}_v2.pkl")
+                new_rk = self.alpha_rk.loc[self.alpha_rk.index>old_rk.index[-1]]
+                pd.concat([old_rk, new_rk], axis=0).to_pickle(f"./dump/{self.alpha_id}_v2.pkl")
+
     def generate_pnl(self):
         ret_df = self.returns.shift(-1)
         pnl = self.wgt_df.mul(ret_df).sum(1).shift(1)*2
@@ -259,6 +273,14 @@ class BackTest:
         out.loc[(self.dateindex.iloc[0], self.dateindex.iloc[-1]), :] = [ret_T*100, sp_T, mdd_T*100, dd_start_T, dd_end_T, tvr_T*100, winr_T*100]
         print(out)
 
+        if self.dump_pnl:
+            if not self.update:
+                self.pnl[['pnl', 'dpos']].to_pickle(f"./pnl/{self.alpha_id}.pnl.pkl")
+            else:
+                old_pnl = pd.read_pickle(f"./pnl/{self.alpha_id}.pnl.pkl")
+                new_pnl = self.pnl[['pnl', 'dpos']].loc[self.pnl.index>old_pnl.index[-1]]
+                pd.concat([old_pnl, new_pnl], axis=0).to_pickle(f"./pnl/{self.alpha_id}.pnl.pkl")
+
     def sigbt(self, topN=200, weight_mode=0, benchmark: str=None, timing_ts: pd.Series=None):
         """
         纯多头信号回测参数说明
@@ -301,9 +323,9 @@ class BackTest:
         self.pnl['nav'] = self.pnl['pnl'].cumsum()
         self.stats()
 
-    def dump(self):
-        self.alpha_rk.to_pickle(f'./dump/{self.alpha_id[:-3]}_v2.pkl')
-        print(f'------------------------{self.alpha_id[:-3]}_v2 dumped-----------------------')
+    # def dump(self):
+    #     self.alpha_rk.to_pickle(f'./dump/{self.alpha_id[:-3]}_v2.pkl')
+    #     print(f'------------------------{self.alpha_id[:-3]}_v2 dumped-----------------------')
 
 class Alpha:
     """

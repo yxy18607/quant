@@ -7,18 +7,25 @@ import polars as pl
 from tqdm import tqdm
 from datetime import datetime, timedelta, time
 import os
+import gc
 
 MAX_INSTS = 10000
 
 class BarDataLoader:
-    def __init__(self, calendar: pd.Series, startdate: str, load_unit: str='60m', load_num: int=10, instruments: list=None, include_overnight: bool=True):
+    def __init__(self, calendar: pd.Series, startdate: str, category: str, load_unit: str='60m', load_num: int=10, instruments: list=None, include_overnight: bool=True):
         self.calendar = calendar
         self.startdate = startdate
+        self.category = category
         self.load_unit = load_unit
         self.load_num = load_num
         self.start_time, self.end_time = self.time_itvs()
         self.instruments = instruments
         self.include_overnight = include_overnight
+
+        if self.category == 'stock':
+            self.mpath = './stock_mbar/ashare_'
+        elif self.category == 'etf':
+            self.mpath = './etf_mbar/etf_'
         self.data_initialize()
 
     def time_itvs(self):
@@ -46,7 +53,7 @@ class BarDataLoader:
         self.dlf = {}
         trans_col = ['open', 'high', 'low', 'close', 'pre', 'amount']
         while date < self.startdate:
-            lf = pl.scan_parquet(f'./etf_mbar/etf_{date}.parquet').with_columns([pl.col(col).cast(pl.Float64) for col in trans_col])
+            lf = pl.scan_parquet(f'{self.mpath}{date}.parquet').with_columns([pl.col(col).cast(pl.Float64) for col in trans_col])
             if self.instruments is not None:
                 lf = lf.filter(pl.col('code').is_in(self.instruments))
             self.dlf[date] = lf
@@ -73,7 +80,7 @@ class BarDataLoader:
         trans_col = ['open', 'high', 'low', 'close', 'pre', 'amount']
         if self.start_time.index(start) == 0:
             # 当日开始滚动时, 更新交易日
-            lf = pl.scan_parquet(f'./etf_mbar/etf_{didx}.parquet').with_columns([pl.col(col).cast(pl.Float64) for col in trans_col])
+            lf = pl.scan_parquet(f'{self.mpath}{didx}.parquet').with_columns([pl.col(col).cast(pl.Float64) for col in trans_col])
             if self.instruments is not None:
                 lf = lf.filter(pl.col('code').is_in(self.instruments))
             self.dlf[didx] = lf
@@ -100,7 +107,8 @@ class BackTest:
 
     startdate           str             回测起始日
     enddate             str             回测终止日
-    instruments         list            回测标的池
+    category            str             回测的品种, stock-股票; etf-ETF
+    instruments         list            回测标的池, None表示全市场
     load_unit           str             信号刷新/持仓周期, 以具体分钟数+单位组成, 目前只支持'Xm'分钟单位
     load_num            int             回看的窗口期, 以load_unit为一个单位
     load_agg            bool            是否以load_unit为单位整体加载数据, True-按load_unit为时间切片的数据; False-按原始分钟为时间切片的数据
@@ -118,6 +126,10 @@ class BackTest:
         self.startdate = cfg.get('startdate')
         self.enddate = cfg.get('enddate')
         self.signal_id = cfg.get('signal_id')
+        self.category = cfg.get('category')
+        if self.category is None:
+            print('Must specify the backtest instrument category.')
+            exit
         self.instruments = cfg.get('instruments')
         self.load_unit = cfg.get('load_unit') # 'Xm'
         self.load_num = cfg.get('load_num')
@@ -156,6 +168,7 @@ class BackTest:
     def backward(self):
         dl = BarDataLoader(calendar=self.calendar,
                            startdate=self.startdate,
+                           category=self.category,
                            load_unit=self.load_unit,
                            load_num=self.load_num,
                            instruments=self.instruments,
@@ -205,9 +218,10 @@ class BackTest:
                 if not self.update:
                     self.pos_hf.write_ipc(f'./dump/{self.signal_id}.feather')
                 else:
-                    old_pos_hf = pl.read_ipc(f'./dump/{self.signal_id}.feather')
-                    new_pos_hf = self.pos_hf.filter(pl.col('datetime')>old_pos_hf.select(pl.col('datetime').max()))
-                    pl.concat([old_pos_hf, new_pos_hf]).write_ipc(f'./dump/{self.signal_id}.feather')
+                    old_pos_hf = pl.DataFrame(pd.read_feather(f'./dump/{self.signal_id}.feather'))
+                    new_pos_hf = self.pos_hf.filter(pl.col('datetime')>old_pos_hf.select(pl.col('datetime').max()).item())
+                    pos_df = pl.concat([old_pos_hf, new_pos_hf])
+                    pos_df.write_ipc(f'./dump/{self.signal_id}.feather')
             except OSError:
                 print('写入feather失败, 请确认是否已经存在内存映射.')
 
