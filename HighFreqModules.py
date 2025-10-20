@@ -11,6 +11,9 @@ import gc
 
 MAX_INSTS = 10000
 
+def get_offset_trd(calendar, date, offset):
+    return calendar[np.maximum(calendar.searchsorted(date)+offset, 0)]
+
 class BarDataLoader:
     def __init__(self, calendar: pd.Series, startdate: str, category: str, load_unit: str='60m', load_num: int=10, instruments: list=None, include_overnight: bool=True):
         self.calendar = calendar
@@ -44,12 +47,9 @@ class BarDataLoader:
                 ts1 = '13:01'
         return start_time, end_time
     
-    def get_offset_trd(self, date, offset):
-        return self.calendar[np.maximum(self.calendar.searchsorted(date)+offset, 0)]
-
     def data_initialize(self):
         MAX_DATES = int(np.ceil(self.load_num/(240/int(self.load_unit[:-1]))))
-        date = self.get_offset_trd(self.startdate, -MAX_DATES)
+        date = get_offset_trd(self.calendar, self.startdate, -MAX_DATES)
         self.dlf = {}
         trans_col = ['open', 'high', 'low', 'close', 'pre', 'amount']
         while date < self.startdate:
@@ -57,7 +57,7 @@ class BarDataLoader:
             if self.instruments is not None:
                 lf = lf.filter(pl.col('code').is_in(self.instruments))
             self.dlf[date] = lf
-            date = self.get_offset_trd(date, 1)
+            date = get_offset_trd(self.calendar, date, 1)
         self.rlf = []; self.rret = []
         for dt, lf in self.dlf.items():
             for start, end in zip(self.start_time, self.end_time):
@@ -187,7 +187,7 @@ class BackTest:
                                .with_columns(pl.lit(datetime.strptime(f'{didx} {end}', "%Y%m%d %H:%M")).alias('datetime'))
                                .select(['code', 'datetime', 'factor'])
                                .collect()
-                               ) # 截止start前一时刻的信号
+                               ) # 截止start前一时刻的信号, 信号时间戳是end时刻滞后, 方便和收益率点积
                 dl.data_update(didx, start, end)
         self.factor = pl.concat(factors).with_columns(pl.col('factor').fill_nan(None).alias('factor'))
         self.ret = pl.concat(dl.rret)
@@ -304,3 +304,66 @@ class BackTest:
                                       (-pl.col('pnl').filter(pl.col('pnl')>0).mean()/pl.col('pnl').filter(pl.col('pnl')<0).mean()).alias('odd')])
                 .with_columns((pl.col('ret')/pl.col('max_dd')).alias('calmar')))
         tot.select(['code', 'ret', 'sp', 'max_dd', 'anntvr', 'winr', 'odd', 'calmar']).write_ipc(f'./pnl/{self.signal_id}.stats.feather')
+
+    
+class PortfolioTest(BackTest):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.startdate = cfg.get('startdate')
+        self.enddate = cfg.get('enddate')
+        self.siglist = cfg.get('siglist')
+        self.calendar = pd.read_pickle('./data/calendar.pkl')
+        self.trainT = cfg.get('trainT') # days
+        self.update_period = cfg.get('update_period') # 'D', 'M', 'Q', 'H', 'Y'
+        self.factor_type = cfg.get('factor_type') # 'factor' or 'pos'
+        self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
+        init_date = self.reset_date(self.startdate) # 训练起始日
+        data_init_date = get_offset_trd(self.calendar, init_date, -self.trainT) # 训练集起始日
+        features = []
+        k_features = 1
+        # lazy预加载训练和预测需要的所有特征数据
+        for name in self.siglist:
+            pf = pl.from_pandas(pd.read_feather('./dump/{name}.feather')).lazy()
+            pf = pf.filter((pl.col('datetime')>=pd.to_datetime(data_init_date))&(pf.col('datetime')<=pd.to_datetime(self.enddate)+pd.to_timedelta(23, 'h')))
+            pf = pf.with_columns(pl.lit(f'feature{k_features}').alias('feature_id'))
+            features.append(features)
+            k_features += 1
+        self.input = pl.concat(features).pivot(index=['code', 'datetime'], on='feature_id', values='factor')
+        self.flag_train = False
+        self.flag_init = False
+         
+    def reset_date(self, date: str):
+        date0 = get_offset_trd(self.calendar, date, 0)
+        if self.update_period == 'M':
+            while get_offset_trd(self.calendar, date0, -1)[4:6] == date0[4:6]:
+                date0 = get_offset_trd(self.calendar, date0, -1)
+        elif self.update_period == 'Q':
+            while not ((get_offset_trd(self.calendar, date0, -1)[4:6] in ['12', '03', '06', '09'])&(date0[4:6] in ['01', '04', '07', '10'])):
+                date0 = get_offset_trd(self.calendar, date0, -1)
+        elif self.update_period == 'H':
+            while not ((get_offset_trd(self.calendar, date0, -1)[4:6] in ['12', '06'])&(date0[4:6] in ['01', '07'])):
+                date0 = get_offset_trd(self.calendar, date0, -1)
+        elif self.update_period == 'Y':
+            while get_offset_trd(self.calendar, date0, -1)[:4] == date0[:4]:
+                date0 = get_offset_trd(self.calendar, date0, -1)
+        return date0
+        
+    def model(self):
+        pass
+
+    def train(self):
+        for date in self.dateindex:
+            # find the retrain date
+            train_end = self.reset_date(date)
+            train_start = get_offset_trd(self.calendar, train_end, -self.trainT)
+            # to get start, we must train model first
+            if not self.flag_init:
+                train_X = self.input.filter((pl.col('datetime')>=pd.to_datetime(train_start))&(pl.col('datetime')<pd.to_datetime(train_end)))
+            # decide if retraining is needed
+            if retrain_date == date:
+                self.flag_train = False
+                train_set = self.input.filter((pl.col('datetime')<=pd.to_datetime(date))
+            
+    
+
+
