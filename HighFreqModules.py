@@ -7,24 +7,25 @@ import polars as pl
 from tqdm import tqdm
 from datetime import datetime, timedelta, time
 import os
-import gc
+from dataclasses import dataclass, field
 
 MAX_INSTS = 10000
 
 def get_offset_trd(calendar, date, offset):
     return calendar[np.maximum(calendar.searchsorted(date)+offset, 0)]
 
+@dataclass
 class BarDataLoader:
-    def __init__(self, calendar: pd.Series, startdate: str, category: str, load_unit: str='60m', load_num: int=10, instruments: list=None, include_overnight: bool=True):
-        self.calendar = calendar
-        self.startdate = startdate
-        self.category = category
-        self.load_unit = load_unit
-        self.load_num = load_num
-        self.start_time, self.end_time = self.time_itvs()
-        self.instruments = instruments
-        self.include_overnight = include_overnight
+    calendar: pd.Series
+    startdate: str
+    category: str
+    load_unit: str = '60m'
+    load_num: int = 10
+    instruments: list = None
+    only_return: bool = False
 
+    def __post_init__(self):
+        self.start_time, self.end_time = self.time_itvs()
         if self.category == 'stock':
             self.mpath = './stock_mbar/ashare_'
         elif self.category == 'etf':
@@ -51,6 +52,7 @@ class BarDataLoader:
         MAX_DATES = int(np.ceil(self.load_num/(240/int(self.load_unit[:-1]))))
         date = get_offset_trd(self.calendar, self.startdate, -MAX_DATES)
         self.dlf = {}
+        self.rlf = []; self.rret = []
         trans_col = ['open', 'high', 'low', 'close', 'pre', 'amount']
         while date < self.startdate:
             lf = pl.scan_parquet(f'{self.mpath}{date}.parquet').with_columns([pl.col(col).cast(pl.Float64) for col in trans_col])
@@ -58,23 +60,21 @@ class BarDataLoader:
                 lf = lf.filter(pl.col('code').is_in(self.instruments))
             self.dlf[date] = lf
             date = get_offset_trd(self.calendar, date, 1)
-        self.rlf = []; self.rret = []
         for dt, lf in self.dlf.items():
             for start, end in zip(self.start_time, self.end_time):
                 t1 = datetime.strptime(start, '%H:%M').time()
                 t2 = datetime.strptime(end, '%H:%M').time()
                 new_lf = lf.filter((pl.col('time_id').dt.time()>=t1)&(pl.col('time_id').dt.time()<=t2))
-                self.rlf.append(new_lf)
-                if not self.include_overnight and self.start_time.index(start) == 0:
-                    ret_lf = new_lf.group_by('code').agg((pl.col('close').last()/pl.col('open').first()-1).alias('ret'))
-                else:
-                    ret_lf = new_lf.group_by('code').agg((pl.col('close').last()/pl.col('pre').first()-1).alias('ret'))
+                if not self.only_return:
+                    self.rlf.append(new_lf)
+                ret_lf = new_lf.group_by('code').agg((pl.col('close').last()/pl.col('pre').first()-1).alias('ret'))
                 self.rret.append(ret_lf
                                  .with_columns(pl.lit(datetime.strptime(f'{dt} {end}', "%Y%m%d %H:%M")).alias('datetime'))
                                  .collect()
                                  )
-                if len(self.rlf)>self.load_num:
-                    self.rlf.pop(0)
+                if not self.only_return:
+                    if len(self.rlf)>self.load_num:
+                        self.rlf.pop(0)
     
     def data_update(self, didx, start, end):
         trans_col = ['open', 'high', 'low', 'close', 'pre', 'amount']
@@ -84,21 +84,21 @@ class BarDataLoader:
             if self.instruments is not None:
                 lf = lf.filter(pl.col('code').is_in(self.instruments))
             self.dlf[didx] = lf
-            self.dlf.pop(list(self.dlf.keys())[0])
+            if len(self.dlf)>1:
+                self.dlf.pop(list(self.dlf.keys())[0])
         t1 = datetime.strptime(start, '%H:%M').time()
         t2 = datetime.strptime(end, '%H:%M').time()
         new_lf = self.dlf[didx].filter((pl.col('time_id').dt.time()>=t1)&(pl.col('time_id').dt.time()<=t2))
-        self.rlf.append(new_lf)
-        self.rlf.pop(0)
-        if not self.include_overnight and self.start_time.index(start) == 0:
-            ret_lf = new_lf.group_by('code').agg((pl.col('close').last()/pl.col('open').first()-1).alias('ret'))
-        else:
-            ret_lf = new_lf.group_by('code').agg((pl.col('close').last()/pl.col('pre').first()-1).alias('ret'))
+        if not self.only_return:
+            self.rlf.append(new_lf)
+            self.rlf.pop(0)
+        ret_lf = new_lf.group_by('code').agg((pl.col('close').last()/pl.col('pre').first()-1).alias('ret'))
         self.rret.append(ret_lf
                          .with_columns(pl.lit(datetime.strptime(f'{didx} {end}', "%Y%m%d %H:%M")).alias('datetime'))
                          .collect()
                          )
 
+@dataclass
 class BackTest:
     """
     cfg参数配置说明
@@ -121,29 +121,22 @@ class BackTest:
     dump_pnl            bool            True-缓存pnl; False-不缓存
     update              bool            True-更新策略数据; False-重写策略数据
     """
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.startdate = cfg.get('startdate')
-        self.enddate = cfg.get('enddate')
-        self.signal_id = cfg.get('signal_id')
-        self.category = cfg.get('category')
-        if self.category is None:
-            print('Must specify the backtest instrument category.')
-            exit
-        self.instruments = cfg.get('instruments')
-        self.load_unit = cfg.get('load_unit') # 'Xm'
-        self.load_num = cfg.get('load_num')
-        self.load_agg = cfg.get('load_agg') if cfg.get('load_agg') is not None else False
-        self.include_overnight = cfg.get('include_overnight') if cfg.get('include_overnight') is not None else True
+    startdate: str
+    enddate: str
+    signal_id: str
+    category: str
+    instruments: list = None
+    load_unit: str = '60m'
+    load_num: int = 10
+    load_agg: bool = False
+    dump_factor: bool = True
+    dump_pnl: bool = True
+    update: bool = False
+    fee: float = 0.0000
 
-        self.dump_factor = cfg.get('dump_factor') if cfg.get('dump_factor') is not None else True
-        self.dump_pnl = cfg.get('dump_pnl') if cfg.get('dump_pnl') is not None else True
-        self.update = cfg.get('update') if cfg.get('update') is not None else False
-
+    def __post_init__(self):
         self.calendar = pd.read_pickle('./data/calendar.pkl')
         self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
-
-        self.fee = cfg.get('fee') if cfg.get('fee') is not None else 0
         print(f'------------------------backtesting {self.signal_id}-----------------------')
 
     def data_agg(self, rlf: list[pl.LazyFrame]):
@@ -171,8 +164,7 @@ class BackTest:
                            category=self.category,
                            load_unit=self.load_unit,
                            load_num=self.load_num,
-                           instruments=self.instruments,
-                           include_overnight=self.include_overnight)
+                           instruments=self.instruments)
         start_time, end_time = dl.start_time, dl.end_time
         factors = []
         pbar = tqdm(self.dateindex)
@@ -305,65 +297,104 @@ class BackTest:
                 .with_columns((pl.col('ret')/pl.col('max_dd')).alias('calmar')))
         tot.select(['code', 'ret', 'sp', 'max_dd', 'anntvr', 'winr', 'odd', 'calmar']).write_ipc(f'./pnl/{self.signal_id}.stats.feather')
 
-    
+@dataclass 
 class PortfolioTest(BackTest):
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.startdate = cfg.get('startdate')
-        self.enddate = cfg.get('enddate')
-        self.siglist = cfg.get('siglist')
+    siglist: list = field(default_factory=list)
+    trainT: int = 0 # days
+    retrain_period: str = 'M' # 'D', 'M', 'Q', 'H', 'Y'
+    factor_type: str = 'factor' # 'factor' or 'pos', use which to train
+
+    def __post_init__(self):
         self.calendar = pd.read_pickle('./data/calendar.pkl')
-        self.trainT = cfg.get('trainT') # days
-        self.update_period = cfg.get('update_period') # 'D', 'M', 'Q', 'H', 'Y'
-        self.factor_type = cfg.get('factor_type') # 'factor' or 'pos'
         self.dateindex = self.calendar[(self.calendar>=self.startdate)&(self.calendar<=self.enddate)]
-        init_date = self.reset_date(self.startdate) # 训练起始日
-        data_init_date = get_offset_trd(self.calendar, init_date, -self.trainT) # 训练集起始日
+        self.init_date = self.reset_date(self.startdate) # first training date
+        self.data_init_date = get_offset_trd(self.calendar, self.init_date, -self.trainT) # start of training data for the first training
         features = []
         k_features = 1
-        # lazy预加载训练和预测需要的所有特征数据
+        # loading all features for training and prediction
         for name in self.siglist:
-            pf = pl.from_pandas(pd.read_feather('./dump/{name}.feather')).lazy()
-            pf = pf.filter((pl.col('datetime')>=pd.to_datetime(data_init_date))&(pf.col('datetime')<=pd.to_datetime(self.enddate)+pd.to_timedelta(23, 'h')))
+            pf = pl.from_pandas(pd.read_feather(f'./dump/{name}.feather'))
+            pf = pf.filter((pl.col('datetime')>=pd.to_datetime(self.data_init_date))&(pl.col('datetime')<=pd.to_datetime(self.enddate)+pd.to_timedelta(23, 'h')))
             pf = pf.with_columns(pl.lit(f'feature{k_features}').alias('feature_id'))
-            features.append(features)
+            features.append(pf)
             k_features += 1
-        self.input = pl.concat(features).pivot(index=['code', 'datetime'], on='feature_id', values='factor')
+        self.input = pl.concat(features).pivot(index=['code', 'datetime'], on='feature_id', values=self.factor_type)
         self.flag_train = False
         self.flag_init = False
          
     def reset_date(self, date: str):
         date0 = get_offset_trd(self.calendar, date, 0)
-        if self.update_period == 'M':
+        if self.retrain_period == 'M':
             while get_offset_trd(self.calendar, date0, -1)[4:6] == date0[4:6]:
                 date0 = get_offset_trd(self.calendar, date0, -1)
-        elif self.update_period == 'Q':
+        elif self.retrain_period == 'Q':
             while not ((get_offset_trd(self.calendar, date0, -1)[4:6] in ['12', '03', '06', '09'])&(date0[4:6] in ['01', '04', '07', '10'])):
                 date0 = get_offset_trd(self.calendar, date0, -1)
-        elif self.update_period == 'H':
+        elif self.retrain_period == 'H':
             while not ((get_offset_trd(self.calendar, date0, -1)[4:6] in ['12', '06'])&(date0[4:6] in ['01', '07'])):
                 date0 = get_offset_trd(self.calendar, date0, -1)
-        elif self.update_period == 'Y':
+        elif self.retrain_period == 'Y':
             while get_offset_trd(self.calendar, date0, -1)[:4] == date0[:4]:
                 date0 = get_offset_trd(self.calendar, date0, -1)
         return date0
         
-    def model(self):
+    def model_train(self, X, y):
+        self.model = None
         pass
 
-    def train(self):
-        for date in self.dateindex:
-            # find the retrain date
-            train_end = self.reset_date(date)
-            train_start = get_offset_trd(self.calendar, train_end, -self.trainT)
-            # to get start, we must train model first
+    def model_predict(self, X):
+        pass
+
+    def parquet_to_numpy(self, X: pl.LazyFrame, y: pl.DataFrame=None):
+        if y is not None:
+            X = X.join(y, on=['code', 'datetime'])
+            arr_X = X.select(X.columns[2:-1]).to_numpy()
+            arr_y = X.select(X.columns[-1]).to_numpy()
+            return arr_X, arr_y
+        else:
+            arr_X = X.select(X.columns[2:]).to_numpy()
+            return arr_X
+    def forward(self):
+        factors = []
+        pbar = tqdm(self.dateindex)
+        for date in pbar:
+            # train model, only when self.trainT>0
             if not self.flag_init:
-                train_X = self.input.filter((pl.col('datetime')>=pd.to_datetime(train_start))&(pl.col('datetime')<pd.to_datetime(train_end)))
-            # decide if retraining is needed
-            if retrain_date == date:
-                self.flag_train = False
-                train_set = self.input.filter((pl.col('datetime')<=pd.to_datetime(date))
+                # initialize data
+                dl = BarDataLoader(self.calendar, self.init_date, self.category, self.load_unit, self.trainT*int(240/int(self.load_unit[:-1])), self.instruments, only_return=True)
+                start_time, end_time = dl.time_itvs()
+                if self.trainT>0:
+                    pbar.set_description(f'training at {self.init_date}:')
+                    X = self.input.filter((pl.col('datetime')>=pd.to_datetime(self.data_init_date))&(pl.col('datetime')<pd.to_datetime(self.init_date)))
+                    y = pl.concat(dl.rret)
+                    trainX, trainy = self.parquet_to_numpy(X, y)
+                    # to get start, we must train model first
+                    self.model_train(trainX, trainy)
+                    self.flag_train = True
+                self.flag_init = True
+            else:
+                if self.trainT>0:
+                    # find the retrain date
+                    train_end = self.reset_date(date)
+                    # decide if retraining is needed
+                    if train_end==date:
+                        pbar.set_description(f'training at {train_end}:')
+                        train_start = get_offset_trd(self.calendar, train_end, -self.trainT)
+                        self.flag_train = False
+                        X = self.input.filter((pl.col('datetime')>=pd.to_datetime(train_start))&(pl.col('datetime')<pd.to_datetime(train_end)))
+                        y = pl.concat(dl.rret[-self.trainT*int(240/int(self.load_unit[:-1])):])
+                        trainX, trainy = self.parquet_to_numpy(X, y)
+                        self.model_train(trainX, trainy)
+                        self.flag_train = True
             
-    
-
-
+            # predict
+            pbar.set_description(f'predicting {date}')
+            for start, end in zip(start_time, end_time):
+                dl.data_update(date, start, end) # update returns
+                X = self.input.filter(pl.col('datetime')==datetime.strptime(f'{date} {end}', '%Y%m%d %H:%M')) # get the lastest features
+                testX = self.parquet_to_numpy(X)
+                predy = self.model_predict(testX)
+                factors.append(pl.DataFrame({'code': X.select('code'), 'datetime': X.select('datetime'), 'factor': predy}))
+        
+        self.factor = pl.concat(factors).with_columns(pl.col('factor').fill_nan(None).alias('factor'))
+        self.ret = pl.concat(dl.rret).filter(pl.col('datetime')>=pd.to_datetime(self.startdate))
