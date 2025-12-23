@@ -1,10 +1,11 @@
 import numpy as np
 import pandas as pd
-import matplotlib
-# matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import polars as pl
+from dataclasses import dataclass
+from typing import Union
 
+@dataclass
 class DailyCTA:
     """
     cfg参数配置说明
@@ -23,26 +24,27 @@ class DailyCTA:
     period          str             绩效统计周期, Y-yearly; M-monthly, 默认Y
     dump_pnl        bool            True-缓存pnl; False-不缓存
     """
-    def __init__(self, cfg):
-        self.startdate = cfg.get('startdate')
-        self.enddate = cfg.get('enddate')
-        self.zone = '' if not cfg.get('zone') else f"_{cfg.get('zone')}"
-        self.slippage = cfg.get('slippage')
-        self.fee = cfg.get('fee')
-        self.trade_price = cfg.get('trade_price')
-        signal_id = cfg.get('signal_id')
-        instruments = cfg.get('instruments')
-        self.mode = cfg.get('mode')
-        self.period = 'Y' if cfg.get('period') is None else cfg.get('period')
-        self.dump_pnl = cfg.get('dump_pnl') if cfg.get('dump_pnl') is not None else True
+    startdate: str
+    enddate: str
+    signal_id: str
+    instruments: Union[list, dict]
+    trade_price: str = 'open'
+    zone: str = ''
+    mode: int = 0
+    slippage: float = 0.
+    fee: float = 0.
+    pnl_period: str = 'Y'
+    dump_pnl: bool = True
+    update: bool = False
 
+    def __post_init__(self):
+        if len(self.zone)>0:
+            self.zone = f'_{self.zone}'
         calendar = pd.read_pickle(f'./data/calendar{self.zone}.pkl')
-        self.df_signal = pd.read_pickle(f'./dump/{signal_id}.pkl')
+        self.signal_df = pd.read_pickle(f'./dump/{self.signal_id}.pkl')
         self.check_calendar(calendar)
-        self.trading_insts(instruments)
-        print(f"--------------backtesting {signal_id}--------------")
-
-        self.signal_id = signal_id
+        self.trading_insts()
+        print(f"--------------backtesting {self.signal_id}--------------")
 
     def __call__(self):
         self.get_pos()
@@ -55,19 +57,18 @@ class DailyCTA:
         elif self.trade_price == 'close':
             offset = 2
         startdate = calendar.iloc[calendar.searchsorted(self.startdate, 'left')-offset]
-        dateindex = self.df_signal.index.intersection(calendar)
+        dateindex = self.signal_df.index.intersection(calendar)
         self.dateindex = pd.Series(dateindex[(dateindex>=startdate)&(dateindex<=self.enddate)])
     
-    def trading_insts(self, instruments):
-        if isinstance(instruments, dict):
-            signal_col = list(instruments.keys())
-            trade_col = list(instruments.values())
+    def trading_insts(self):
+        if isinstance(self.instruments, dict):
+            signal_col = list(self.instruments.keys())
+            trade_col = list(self.instruments.values())
             self.instruments = trade_col
-            self.df_signal = self.df_signal.loc[self.dateindex, signal_col]
-            self.df_signal.columns = trade_col
+            self.signal_df = self.signal_df.loc[self.dateindex, signal_col]
+            self.signal_df.columns = trade_col
         else:
-            self.df_signal = self.df_signal.loc[self.dateindex, instruments]
-            self.instruments = instruments
+            self.signal_df = self.signal_df.loc[self.dateindex, self.instruments]
 
     def profit_ana(self, retdays=10):
         pred_corr = pd.Series()
@@ -91,10 +92,9 @@ class DailyCTA:
             self.data_dict[inst] = df
 
         if self.trade_price in ['open', 'vwap']:
-            self.pos = self.df_signal.shift(2).fillna(0)
+            self.pos = self.signal_df.shift(2).fillna(0)
         elif self.trade_price == 'close':
-            self.pos = self.df_signal.shift(1).fillna(0)
-
+            self.pos = self.signal_df.shift(1).fillna(0)
         if self.mode == 1:
             self.pos = np.maximum(0, self.pos)
         elif self.mode == 2:
@@ -108,53 +108,56 @@ class DailyCTA:
             pnl[inst] = pnl[inst] - self.pos[inst].diff(1).abs() * (self.fee + self.slippage / df['close'])
         pnl = pnl.mean(1)
         self.pnl = pd.DataFrame({'pnl': pnl,
-                                 'if_trade': self.pos.diff().fillna(0).any(axis=1).astype(int),
-                                 'if_hold': self.pos.any(axis=1),
-                                 'dpos': self.pos.diff(1).abs().mean(1)})
-        self.pnl['trade_id'] = self.pnl['if_trade'].cumsum()
+                                 'dpos': self.pos.diff().abs().mean(1)})
+        self.pnl = self.pnl[self.pnl.index>=self.startdate]
+        if self.dump_pnl:
+            if self.update:
+                old_pnl = pd.read_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+                new_pnl = self.pnl.loc[self.pnl.index>old_pnl.index[-1]]
+                pd.concat([old_pnl, new_pnl], axis=0).to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
+            else:
+                self.pnl.to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
     def stat(self):
-        self.pnl = self.pnl[self.pnl.index>=self.startdate]
         self.pnl['nav'] = self.pnl['pnl'].cumsum()
+        pnl = self.pnl['pnl']; nav = self.pnl['nav']
         # total
-        ret = self.pnl['pnl'].mean() * 250
-        sp = self.pnl['pnl'].mean() / self.pnl['pnl'].std() * np.sqrt(250)
-        self.pnl['dd_T'] = self.pnl['nav'].cummax() - self.pnl['nav']
-        mdd = self.pnl['dd_T'].max()
-        dd_end = self.pnl['dd_T'].idxmax()
-        dd_start = self.pnl.loc[:dd_end, 'nav'].idxmax()
-        dd_duration = np.bincount(self.pnl['nav'].cummax().diff(1).astype(bool).cumsum()).max()
-        pnl_byid = self.pnl.loc[self.pnl['if_hold']].groupby('trade_id')['pnl'].sum()
-        winr = (pnl_byid>0).mean()
-        odd = -pnl_byid[pnl_byid>0].mean() / pnl_byid[pnl_byid<0].mean()
+        ret = pnl.mean()*250
+        sp = pnl.mean() / pnl.std() * np.sqrt(250)
+        dd_T = nav.cummax() - nav
+        mdd = dd_T.max()
+        dd_end = dd_T.idxmax()
+        dd_start = nav[:dd_end].idxmax()
+        dd_duration = np.bincount(nav.cummax().diff().astype(bool).cumsum()).max()
+        profit = pnl[pnl>0]; loss = pnl[pnl<0]
+        winr = len(profit)/(len(profit)+len(loss))
+        odd = -profit.mean()/loss.mean()
         calmar = ret / mdd
         tvr = self.pnl['dpos'].mean(0)*250
 
         # by period
-        if self.period == 'Y':
+        if self.pnl_period == 'Y':
             group_col = 'year'
             self.pnl[group_col] = self.pnl.index.str[:4]
-        elif self.period == 'M':
+        elif self.pnl_period == 'M':
             group_col = 'month'
             self.pnl[group_col] = self.pnl.index.str[:6]
-        elif self.period == 'H':
+        elif self.pnl_period == 'H':
             group_col = 'half'
             self.pnl[group_col] = self.pnl.index.str[:4]+(self.pnl.index.str[4:6].astype(int)//7).astype(str)
-        elif self.period == 'Q':
+        elif self.pnl_period == 'Q':
             group_col = 'quarter'
             self.pnl[group_col] = self.pnl.index.str[:4]+((self.pnl.index.str[4:6].astype(int)-1)//3).astype(str)
         gpnl = self.pnl.groupby(group_col)
-        self.pnl['dd_y'] = gpnl['nav'].cummax() - self.pnl['nav']
-        ret_y = gpnl['pnl'].mean() * 250
-        sp_y = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(250)
-        mdd_y = gpnl['dd_y'].max()
-        dd_end_y = gpnl['dd_y'].idxmax()
-        dd_start_y = gpnl.apply(lambda x: x.loc[:dd_end_y[x[group_col].values[0]], 'nav'].idxmax())
-        dd_duration_y = gpnl['nav'].apply(lambda g: np.bincount(g.cummax().diff(1).astype(bool).cumsum()).max())
-        pnl_byid_y = self.pnl.loc[self.pnl['if_hold']].groupby(['trade_id', group_col])['pnl'].sum()
-        gpnl_byid_y = pnl_byid_y.groupby(level=group_col)
-        winr_y = gpnl_byid_y.apply(lambda x: (x>0).mean())
-        odd_y = -gpnl_byid_y.apply(lambda x: x[x>0].mean() / x[x<0].mean())
+        pnl_y = gpnl['pnl']; nav_y = gpnl['nav']
+        ret_y = pnl_y.mean() * 250
+        sp_y = pnl_y.mean() / pnl_y.std() * np.sqrt(250)
+        mdd_y = nav_y.apply(lambda x: (x.cummax()-x).max())
+        dd_end_y = nav_y.apply(lambda x: (x.cummax()-x).idxmax())
+        dd_start_y = nav_y.apply(lambda x: x[:dd_end_y[x.name]].idxmax())
+        dd_duration_y = nav_y.apply(lambda g: np.bincount(g.cummax().diff().astype(bool).cumsum()).max())
+        winr_y = pnl_y.apply(lambda x: (x>0).sum()/((x>0).sum()+(x<0).sum()))
+        odd_y = -pnl_y.apply(lambda x: x[x>0].mean() / x[x<0].mean())
         calmar_y = ret_y / mdd_y
         tvr_y = gpnl['dpos'].mean() * 250
 
@@ -174,8 +177,6 @@ class DailyCTA:
         out.loc[(self.pnl.index[0], self.pnl.index[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, dd_duration, tvr, winr*100, odd, calmar]
         print(out)
 
-        if self.dump_pnl:
-            self.pnl[['pnl', 'dpos']].to_pickle(f"./pnl/{self.signal_id}.pnl.pkl")
 
     def plot_curve(self, os_startdate:str=None):
         benchmark = pd.DataFrame()
@@ -220,11 +221,11 @@ class Beta:
         self.dateindex = self.calendar.iloc[np.maximum(_startdate, _mindate):_enddate]
         self.signal_df = pd.DataFrame()
 
-    def generate_signal(self):
+    def process(self):
         signal_df = pd.DataFrame()
         for inst in self.instruments:
             df = pd.read_pickle(f'./data/{inst}.pkl').loc[self.dateindex]
-            if not self.pf_to_daily.__doc__ == 'UNIMPLEMENTED':
+            if not self.intra_to_daily.__doc__ == 'UNIMPLEMENTED':
                 pf = (pl.scan_parquet(f'./idx_mbar/{inst}.parquet')
                       .filter(pl.col('date_id').is_in(pl.Series(pd.to_datetime(self.dateindex).dt.date)))
                     .with_columns([pl.col('close').cast(pl.Float64),
@@ -232,19 +233,20 @@ class Beta:
                                     pl.col('high').cast(pl.Float64),
                                     pl.col('low').cast(pl.Float64),
                                     pl.col('pre').cast(pl.Float64),
+                                    pl.col('volume').cast(pl.Int64),
                                     pl.col('amount').cast(pl.Int64)]))
-                pf = self.pf_to_daily(pf).sort('date_id').collect().to_pandas().set_index('date_id')
+                pf = self.intra_to_daily(pf).sort('date_id').collect().to_pandas().set_index('date_id')
                 pf.index = pf.index.strftime('%Y%m%d')
                 df = pd.concat([df, pf], axis=1, join='inner')
-            signal = self.generate_beta(df)
+            signal = self.generate_signal(df)
             signal_df[inst] = signal
         signal_df.index = self.dateindex
         self.signal_df = signal_df
 
-    def generate_beta(self, df: pd.DataFrame):
+    def generate_signal(self, df: pd.DataFrame):
         pass
 
-    def pf_to_daily(self, pf: pl.LazyFrame):
+    def intra_to_daily(self, pf: pl.LazyFrame):
         "UNIMPLEMENTED"
 
     def dump(self):

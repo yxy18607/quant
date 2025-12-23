@@ -4,17 +4,18 @@ import importlib
 import os
 
 # beta_list = [f[:-3] for f in os.listdir('./beta') if f.startswith('beta') and f.endswith('.py')]
-beta_list = ['hktiming']
-# beta_list = ['timing1', 'timing2', 'timing5']
+# beta_list = ['timing6']
+# beta_list = ['hk1']
+beta_list = ['timing1', 'timing2', 'timing3', 'timing4', 'timing5', 'timingc_v1', 'timingc_v2', 'timingc_v3']
 
 # mode:0——重写，1——更新
-mode = 0
+mode = 1
 
-cfg = {'startdate': '20180101',
-       'enddate': '20250530',
-    #    'instruments': ['zz1000', 'zz500', 'hs300', 'sz50'],
-       'instruments': ['hsi'],
-       'zone': 'hk'
+cfg = {'startdate': '20251201',
+       'enddate': '20251231',
+       'instruments': ['zz1000', 'zz500', 'hs300', 'sz50'],
+    #    'instruments': ['hsi', 'hstech'],
+    #    'zone': 'hk'
 }
 
 for beta_file in beta_list:
@@ -23,7 +24,7 @@ for beta_file in beta_list:
     if hasattr(module, beta_file):
         beta_class = getattr(module, beta_file)
         beta = beta_class(cfg)
-        beta.generate_signal()
+        beta.process()
         if mode:
             old = pd.read_pickle(f'./dump/{beta_file}.pkl')
             new = beta.signal_df.copy()
