@@ -9,7 +9,7 @@ class timing2(Beta):
     def __init__(self, cfg):
         super().__init__(cfg)
         
-    def generate_beta(self, df):
+    def generate_signal(self, df):
         window = 5
         high = df['high'].values; low = df['low'].values; open = df['open'].values; close = df['close'].values; returns = df['pct_change'].values; volume = df['volume'].values
         signal = np.full(len(df), 0)

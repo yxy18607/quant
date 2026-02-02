@@ -9,7 +9,7 @@ class timing3(Beta):
     def __init__(self, cfg):
         super().__init__(cfg)
         
-    def generate_beta(self, df):
+    def generate_signal(self, df):
         window = 6
         ret = ((df['high']+df['low'])-(df['close']+df['open'])).values; volume = df['volume'].values
         skew = df['low'].rolling(5).skew().values
