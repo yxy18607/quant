@@ -270,19 +270,26 @@ class BackTest:
         self.ret_d = self.pnl_hf.group_by(['date', 'code']).agg(pl.col('ret').sum().alias('daily_ret')).group_by('date').agg(pl.col('daily_ret').mean())
         benchmark = self.ret_d.select(pl.col('daily_ret').cum_sum()).to_pandas()['daily_ret']
         plot_df = pd.DataFrame({'strategy': self.pnl_pd['nav'], 'benchmark': benchmark.values})
+        x_axis = np.arange(len(plot_df))  # 显式生成 0, 1, 2... 的序号
         if not os_startdate:
-            plot_df.plot()
+            plot_df.plot(figsize=(12, 6))
         else:
-            plot_df['is'] = plot_df.index<pd.to_datetime(os_startdate)
-            ax = plot_df.loc[plot_df['is'], 'strategy'].plot(color='#1f77b4', label='strategy(IS)', figsize=(12, 6))
-            plot_df.loc[plot_df['is'], 'benchmark'].plot(ax=ax, color='#ffbb78', label='benchmark(IS)')
-            plot_df.loc[~plot_df['is'], 'strategy'].plot(ax=ax, color='#d62728', label='strategy(OS)')
-            plot_df.loc[~plot_df['is'], 'benchmark'].plot(ax=ax, color='#ff7f0e', label='benchmark(OS)')
-            ax.axvline(pd.to_datetime(os_startdate), color="black", linestyle="--")  # 添加分割线
+            os_idx_value = plot_df.index.searchsorted(os_startdate) # 找到样本外分界日期
+            is_mask = plot_df.index < os_startdate
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(x_axis[is_mask], plot_df.loc[is_mask, 'strategy'], color='#1f77b4', label='strategy(IS)')
+            ax.plot(x_axis[is_mask], plot_df.loc[is_mask, 'benchmark'], color='#ffbb78', label='benchmark(IS)')
+            os_mask = plot_df.index >= os_startdate
+            ax.plot(x_axis[os_mask], plot_df.loc[os_mask, 'strategy'], color='#d62728', label='strategy(OS)')
+            ax.plot(x_axis[os_mask], plot_df.loc[os_mask, 'benchmark'], color='#ff7f0e', label='benchmark(OS)')
+            ax.axvline(os_idx_value, color="black", linestyle="--")
+        step = len(plot_df) // 10
+        plt.xticks(range(0, len(plot_df), step), plot_df.index[::step], rotation=45)
         plt.legend()
+        plt.tight_layout()
         plt.show()
         
-    def stats_bycode(self):
+    def stats_cross(self):
         tot = (self.pnl_d
                .with_columns(pl.col('pnl').cum_sum().over('code').alias('nav'))
                .with_columns((pl.col('nav').cum_max().over('code')-pl.col('nav')).alias('dd'))
