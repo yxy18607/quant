@@ -270,6 +270,7 @@ class BackTest:
         self.ret_d = self.pnl_hf.group_by(['date', 'code']).agg(pl.col('ret').sum().alias('daily_ret')).group_by('date').agg(pl.col('daily_ret').mean())
         benchmark = self.ret_d.select(pl.col('daily_ret').cum_sum()).to_pandas()['daily_ret']
         plot_df = pd.DataFrame({'strategy': self.pnl_pd['nav'], 'benchmark': benchmark.values})
+        plot_df.index = plot_df.index.strftime('%Y%m%d')
         x_axis = np.arange(len(plot_df))  # 显式生成 0, 1, 2... 的序号
         if not os_startdate:
             plot_df.plot(figsize=(12, 6))
