@@ -40,13 +40,14 @@ class BackTest:
         self.alphaindex = self.calendar[(self.calendar>=self._alphastart)&(self.calendar<=self.enddate)] # alpha op相关的区间
         self.dataindex = self.calendar[(self.calendar>=self._datastart)&(self.calendar<=self.enddate)] # 取数区间
 
-        self.alpha_df = pd.read_pickle(f'./dump/{self.alpha_id}.pkl').loc[self.dataindex]
+        self.alpha_df = pd.read_pickle(f'./dump/{self.alpha_id}_v1.pkl').loc[self.dataindex]
         self.listdays = pd.read_pickle('./data/listdays.pkl').loc[self.alphaindex]
         self.suspend = pd.read_pickle('./data/is_suspend.pkl').loc[self.alphaindex]
         self.st = pd.read_pickle('./data/is_st.pkl').loc[self.alphaindex]
         self.price = pd.read_pickle('./data/close.pkl').loc[self.alphaindex]
         self.returns = pd.read_pickle('./data/returns.pkl').loc[self.dateindex]
 
+        self.alpha_df = self.alpha_df.reindex(columns=self.price.columns)
         self.get_valid()
 
         # 确定固定调仓日
@@ -188,7 +189,9 @@ class BackTest:
         valid = gpos>=0
         nInsts = gpos.apply(lambda x: np.bincount(x[valid.loc[x.name]]), axis=1)
         nVals = gpos.apply(lambda x: np.bincount(x[valid.loc[x.name]], ret_df.loc[x.name][valid.loc[x.name]]), axis=1)
-        gret = pd.DataFrame((nVals / nInsts).tolist(), index=gpos.index).mean() * 250/retdays
+        gret = pd.DataFrame((nVals / nInsts).tolist(), index=gpos.index)
+        gret = gret.sub(gret.mean(1), axis=0)
+        gret = gret.mean() * 250/retdays
         output = ''
         for idx, row in gret.items():
             output += '{}: {:.4%}| '.format(idx, row)
