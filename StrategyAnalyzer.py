@@ -4,6 +4,7 @@
 提供量化策略分析常用功能：
   - 条件收益率统计 (structure_stats / annual_stat)
   - 策略绩效回顾 (performance_review)
+  - 多策略曲线对比 (pnl_compare)
   - 分层测试 / Decile Analysis (decile_analysis)
   - 滚动分布监控 (rolling_stats)
   - 离散仓位单调性分析 (position_analysis)
@@ -36,10 +37,22 @@ from typing import List, Optional, Union, Tuple
 def _dd_duration(nav: pd.Series) -> int:
     """计算最长回撤持续天数（峰值到恢复的交易日数）。"""
     diff = nav.cummax().diff()
-    # 首日 diff 为 NaN，视为新峰值起始
     groups = diff.fillna(1).astype(bool).cumsum()
     counts = np.bincount(groups)
     return counts.max() if len(counts) > 0 else 0
+
+
+def _dd_info(nav: pd.Series) -> Tuple[int, object, object]:
+    """计算最长回撤持续天数及起止日期。返回 (duration, start, end)。"""
+    diff = nav.cummax().diff()
+    groups = diff.fillna(1).astype(bool).cumsum()
+    counts = np.bincount(groups)
+    if len(counts) == 0:
+        return 0, None, None
+    longest = counts.argmax()
+    mask = groups == longest
+    idx = nav.index[mask]
+    return counts.max(), idx[0], idx[-1]
 
 
 def _plot_decile_bars(ax, labels, values, title, color):
@@ -76,6 +89,21 @@ def _fmt_print(df: pd.DataFrame, fmt: dict):
     print(out)
 
 
+def _make_period_col(index: pd.Index, period: str) -> pd.Series:
+    """根据自然日周期生成分组标签列（不随起始日平移）。"""
+    s = pd.Series(index, index=index)
+    if period == 'Y':
+        return s.str[:4]
+    elif period == 'M':
+        return s.str[:6]
+    elif period == 'Q':
+        return s.str[:4] + ((s.str[4:6].astype(int) - 1) // 3).astype(str)
+    elif period == 'H':
+        return s.str[:4] + (s.str[4:6].astype(int) // 7).astype(str)
+    else:
+        raise ValueError(f"period 须为 'M'/'Q'/'H'/'Y'，当前: {period}")
+
+
 # ============================================================================
 # StrategyAnalyzer Class
 # ============================================================================
@@ -104,7 +132,8 @@ class StrategyAnalyzer:
     # ========================================================================
 
     @staticmethod
-    def structure_stats(fret: pd.Series, *states: pd.Series, verbose: bool = True) -> pd.DataFrame:
+    def structure_stats(fret: pd.Series, *states: pd.Series,
+                        return_df: bool = False) -> Optional[pd.DataFrame]:
         """
         条件收益率统计：在不同市场状态下统计未来收益率的分布特征。
 
@@ -114,13 +143,12 @@ class StrategyAnalyzer:
             未来收益率序列（日频）。
         *states : pd.Series (bool)
             一组条件布尔掩码，每个与 fret 同 index。
-        verbose : bool
-            是否打印格式化结果。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅打印）。
 
         Returns
         -------
-        pd.DataFrame
-            列：count, wgt, annret, annstd, winr, odd, kelly, annsp。
+        pd.DataFrame or None
         """
         ann_div = len(fret) / 250
         records = []
@@ -150,15 +178,15 @@ class StrategyAnalyzer:
                 'annsp': np.abs(sf.mean() / sf.std()) * np.sqrt(n / ann_div) if sf.std() > 0 else 0,
             })
         result = pd.DataFrame(records, index=np.arange(1, len(states) + 1))
-        if verbose:
-            _fmt_print(result, {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
-                                'odd': '.4f', 'kelly': '.4f', 'annsp': '.2f'})
-        return result
+        _fmt_print(result, {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
+                            'odd': '.4f', 'kelly': '.4f', 'annsp': '.2f'})
+        return result if return_df else None
 
     @staticmethod
-    def annual_stat(fret: pd.Series, state: pd.Series, verbose: bool = True) -> pd.DataFrame:
+    def annual_stat(fret: pd.Series, state: pd.Series,
+                    return_df: bool = False) -> Optional[pd.DataFrame]:
         """
-        按年份拆分统计条件收益率。
+        按年拆分统计条件收益率，最近未满年份也会统计。
 
         Parameters
         ----------
@@ -166,17 +194,17 @@ class StrategyAnalyzer:
             未来收益率序列（完整样本）。
         state : pd.Series (bool)
             条件布尔掩码。
-        verbose : bool
-            是否打印格式化结果。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅打印）。
 
         Returns
         -------
-        pd.DataFrame
-            按年份索引，列：count, wgt, annret, annstd, winr, odd, kelly, annsp。
+        pd.DataFrame or None
         """
         df = pd.DataFrame({'fret': fret[state]})
         df['year'] = df.index.str[:4]
-        ann_num = (pd.DataFrame({'fret': fret, 'year': fret.index.str[:4]})
+        _fret_year = fret.index.str[:4]
+        ann_num = (pd.DataFrame({'fret': fret, 'year': _fret_year})
                    .groupby('year')['fret'].count())
         ann_div = ann_num / 250
         group = df.groupby('year')['fret']
@@ -201,10 +229,9 @@ class StrategyAnalyzer:
             'kelly': kelly,
             'annsp': annsp,
         })
-        if verbose:
-            _fmt_print(result, {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
-                                'odd': '.4f', 'kelly': '.2f', 'annsp': '.2f'})
-        return result
+        _fmt_print(result, {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
+                            'odd': '.4f', 'kelly': '.2f', 'annsp': '.2f'})
+        return result if return_df else None
 
     @staticmethod
     def annual_metric(pnl: pd.Series, coef_ann: float) -> Tuple[float, float, int]:
@@ -237,8 +264,8 @@ class StrategyAnalyzer:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         ax: Optional[Union[plt.Axes, np.ndarray]] = None,
-        verbose: bool = True,
-    ) -> pd.DataFrame:
+        return_df: bool = False,
+    ) -> Optional[pd.DataFrame]:
         """
         分层测试（Decile Analysis）：按市场监控指标的分位数组统计策略表现。
 
@@ -251,22 +278,22 @@ class StrategyAnalyzer:
         n_groups : int
             分组数量，默认 5。
         start_date, end_date : str, optional
-            截取时间区间（YYYY-MM-DD 或 YYYYMMDD）。
+            截取时间区间（YYYY-MM-DD 或 YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
         ax : matplotlib Axes, optional
             指定绘图轴（需 2 个）。若为 None 则自动创建。
-        verbose : bool
-            是否绘图。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅绘图）。
 
         Returns
         -------
-        pd.DataFrame
-            各组年化收益率和夏普比率。
+        pd.DataFrame or None
         """
         df = pd.concat([indicator.rename('indicator'), pnl.rename('pnl')], axis=1).dropna()
-        if start_date:
-            df = df.loc[start_date:]
-        if end_date:
-            df = df.loc[:end_date]
+        if start_date is None:
+            start_date = '20180101'
+        if end_date is None:
+            end_date = df.index.max().strftime('%Y%m%d') if hasattr(df.index.max(), 'strftime') else str(df.index.max())
+        df = df.loc[start_date:end_date]
         df['group'] = pd.qcut(df['indicator'], q=n_groups,
                               labels=[f'G{i + 1}' for i in range(n_groups)],
                               duplicates='drop')
@@ -275,23 +302,19 @@ class StrategyAnalyzer:
             'sharpe': df.groupby('group', observed=True)['pnl'].apply(
                 lambda x: x.mean() / x.std() * np.sqrt(252) if x.std() > 0 else 0),
         })
-        if verbose:
-            if ax is None:
-                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            else:
-                axes = ax
-            title_prefix = ''
-            if start_date or end_date:
-                s = start_date or df.index[0].strftime('%Y-%m-%d') if hasattr(df.index[0], 'strftime') else str(df.index[0])
-                e = end_date or df.index[-1].strftime('%Y-%m-%d') if hasattr(df.index[-1], 'strftime') else str(df.index[-1])
-                title_prefix = f' ({s} to {e})'
-            _plot_decile_bars(axes[0], result.index, result['annret'],
-                              f'Annualized Return by Indicator Quantiles{title_prefix}', '#4C72B0')
-            _plot_decile_bars(axes[1], result.index, result['sharpe'],
-                              f'Annualized Sharpe by Indicator Quantiles{title_prefix}', '#C44E52')
-            plt.tight_layout()
-            plt.show()
-        return result
+        # always plot
+        if ax is None:
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        else:
+            axes = ax
+        title_prefix = f' ({start_date} to {end_date})'
+        _plot_decile_bars(axes[0], result.index, result['annret'],
+                          f'Annualized Return by Indicator Quantiles{title_prefix}', '#4C72B0')
+        _plot_decile_bars(axes[1], result.index, result['sharpe'],
+                          f'Annualized Sharpe by Indicator Quantiles{title_prefix}', '#C44E52')
+        plt.tight_layout()
+        plt.show()
+        return result if return_df else None
 
     @staticmethod
     def rolling_stats(
@@ -300,8 +323,8 @@ class StrategyAnalyzer:
         start: Optional[str] = None,
         end: Optional[str] = None,
         ax: Optional[Union[plt.Axes, np.ndarray]] = None,
-        verbose: bool = True,
-    ) -> pd.DataFrame:
+        return_df: bool = False,
+    ) -> Optional[pd.DataFrame]:
         """
         PnL 滚动分布监控：滚动均值、标准差、偏度、峰度。
 
@@ -312,21 +335,21 @@ class StrategyAnalyzer:
         window : int
             滚动窗口大小，默认 120。
         start, end : str, optional
-            截取时间区间（YYYYMMDD）。
+            截取时间区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
         ax : matplotlib Axes, optional
             指定绘图轴（需 4 个）。
-        verbose : bool
-            是否绘图。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅绘图）。
 
         Returns
         -------
-        pd.DataFrame
-            列：mean, std, skew, kurt。
+        pd.DataFrame or None
         """
-        if start:
-            pnl = pnl[start:]
-        if end:
-            pnl = pnl[:end]
+        if start is None:
+            start = '20180101'
+        if end is None:
+            end = pnl.index.max().strftime('%Y%m%d') if hasattr(pnl.index.max(), 'strftime') else str(pnl.index.max())
+        pnl = pnl[start:end]
         pnl = pnl.dropna()
         df = pd.DataFrame({
             'mean': pnl.rolling(window).mean(),
@@ -334,19 +357,19 @@ class StrategyAnalyzer:
             'skew': pnl.rolling(window).skew(),
             'kurt': pnl.rolling(window).kurt(),
         })
-        if verbose:
-            if ax is None:
-                fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
-            else:
-                axes = ax
-            for i, col in enumerate(['mean', 'std', 'skew', 'kurt']):
-                axes[i].plot(df.index, df[col], linewidth=0.8)
-                axes[i].set_ylabel(col)
-                axes[i].grid(True, alpha=0.3)
-            axes[0].set_title(f'Rolling Stats (window={window})')
-            plt.tight_layout()
-            plt.show()
-        return df
+        # always plot
+        if ax is None:
+            fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
+        else:
+            axes = ax
+        for i, col in enumerate(['mean', 'std', 'skew', 'kurt']):
+            axes[i].plot(df.index, df[col], linewidth=0.8)
+            axes[i].set_ylabel(col)
+            axes[i].grid(True, alpha=0.3)
+        axes[0].set_title(f'Rolling Stats (window={window})')
+        plt.tight_layout()
+        plt.show()
+        return df if return_df else None
 
     # ========================================================================
     # Instance Methods — 基于文件读写的策略分析
@@ -355,35 +378,51 @@ class StrategyAnalyzer:
     def performance_review(
         self,
         pnl: Union[str, pd.DataFrame],
-        start: str,
-        end: str,
-        verbose: bool = True,
-    ) -> pd.DataFrame:
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        period: str = 'Y',
+        return_df: bool = False,
+    ) -> Optional[pd.DataFrame]:
         """
         策略绩效全面回顾：年化收益、夏普、最大回撤、Calmar、胜率、赔率、换手率等。
-        按年度拆分，并在末尾汇总全区间。
+        按指定周期拆分（严格自然月/季/半年/年），末尾汇总全区间。
 
         Parameters
         ----------
         pnl : str or pd.DataFrame
             策略 PnL 文件名（不含 .pnl.pkl 后缀）或包含 'pnl' 列的 DataFrame。
-        start, end : str
-            统计区间（YYYYMMDD）。
-        verbose : bool
-            是否打印结果。
+        start, end : str, optional
+            统计区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
+        period : str
+            统计周期：'M' 月 / 'Q' 季 / 'H' 半年 / 'Y' 年（默认）。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅打印）。
 
         Returns
         -------
-        pd.DataFrame
-            MultiIndex (from, to) 绩效表。
+        pd.DataFrame or None
         """
         if isinstance(pnl, str):
             pnl = pd.read_pickle(f'{self.pnl_dir}/{pnl}.pnl.pkl')
+        if start is None:
+            start = '20180101'
+        if end is None:
+            end = pnl.index.max().strftime('%Y%m%d') if hasattr(pnl.index.max(), 'strftime') else str(pnl.index.max())
         pnl = pnl.query('@start <= index <= @end').copy()
         pnl.index = pd.to_datetime(pnl.index)
         dateindex = pnl.index
         pnl['nav'] = pnl['pnl'].cumsum()
-        pnl['year'] = pnl.index.year.values
+        _raw = pnl.index.strftime('%Y%m%d')
+        if period == 'Y':
+            pnl['period'] = _raw.str[:4]
+        elif period == 'M':
+            pnl['period'] = _raw.str[:6]
+        elif period == 'Q':
+            pnl['period'] = _raw.str[:4] + ((_raw.str[4:6].astype(int) - 1) // 3).astype(str)
+        elif period == 'H':
+            pnl['period'] = _raw.str[:4] + (_raw.str[4:6].astype(int) // 7).astype(str)
+        else:
+            raise ValueError(f"period 须为 'M'/'Q'/'H'/'Y'，当前: {period}")
         has_dpos = 'dpos' in pnl.columns
 
         # --- 全区间 ---
@@ -393,7 +432,7 @@ class StrategyAnalyzer:
         mdd = pnl['dd_T'].max()
         dd_end = pnl['dd_T'].idxmax()
         dd_start = pnl.loc[:dd_end, 'nav'].idxmax()
-        dd_dur = _dd_duration(pnl['nav'])
+        dd_dur, dd_dur_start, dd_dur_end = _dd_info(pnl['nav'])
         pos = pnl['pnl'] > 0
         neg = pnl['pnl'] < 0
         n_pos, n_neg = pos.sum(), neg.sum()
@@ -402,52 +441,58 @@ class StrategyAnalyzer:
         calmar = ret / mdd if mdd > 0 else np.inf
         tvr = pnl['dpos'].mean() * 250 if has_dpos else np.nan
 
-        # --- 年度 ---
-        gpnl = pnl.groupby('year')
-        pnl['dd_y'] = gpnl['nav'].cummax() - pnl['nav']
-        ret_y = gpnl['pnl'].mean() * 250
-        sp_y = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(250)
-        mdd_y = gpnl['dd_y'].max()
-        dd_end_y = gpnl['dd_y'].idxmax()
-        dd_start_y = gpnl.apply(
-            lambda x: x.loc[:dd_end_y[x.name], 'nav'].idxmax()
-            if pd.notna(dd_end_y.get(x.name)) else pd.NaT,
+        # --- 按周期 ---
+        gpnl = pnl.groupby('period')
+        pnl['dd_p'] = gpnl['nav'].cummax() - pnl['nav']
+        ret_p = gpnl['pnl'].mean() * 250
+        sp_p = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(250)
+        mdd_p = gpnl['dd_p'].max()
+        dd_end_p = gpnl['dd_p'].idxmax()
+        dd_start_p = gpnl.apply(
+            lambda x: x.loc[:dd_end_p[x.name], 'nav'].idxmax()
+            if pd.notna(dd_end_p.get(x.name)) else pd.NaT,
             include_groups=False,
         )
-        dd_dur_y = gpnl['nav'].apply(_dd_duration)
-        winr_y = gpnl['pnl'].apply(
+        _dd_info_p = gpnl['nav'].apply(_dd_info)
+        dd_dur_p = _dd_info_p.map(lambda x: x[0])
+        dd_dur_start_p = _dd_info_p.map(lambda x: x[1])
+        dd_dur_end_p = _dd_info_p.map(lambda x: x[2])
+        winr_p = gpnl['pnl'].apply(
             lambda x: ((x > 0).sum() / ((x > 0).sum() + (x < 0).sum()))
             if ((x > 0).sum() + (x < 0).sum()) > 0 else 0)
-        odd_y = -gpnl['pnl'].apply(
+        odd_p = -gpnl['pnl'].apply(
             lambda x: x[x > 0].mean() / x[x < 0].mean() if (x < 0).sum() > 0 else np.inf)
-        calmar_y = ret_y / mdd_y.replace(0, np.nan)
-        tvr_y = gpnl['dpos'].mean() * 250 if has_dpos else pd.Series(np.nan, index=ret_y.index)
+        calmar_p = ret_p / mdd_p.replace(0, np.nan)
+        tvr_p = gpnl['dpos'].mean() * 250 if has_dpos else pd.Series(np.nan, index=ret_p.index)
 
         # --- 组装 ---
-        idx_from = gpnl.head(1).index
-        idx_to = gpnl.tail(1).index
+        idx_from = [d.strftime('%Y%m%d') for d in gpnl.head(1).index]
+        idx_to = [d.strftime('%Y%m%d') for d in gpnl.tail(1).index]
         out = pd.DataFrame({
-            'annret': ret_y.values * 100,
-            'annsp': sp_y.values,
-            'mdd': mdd_y.values * 100,
-            'mdd_start': dd_start_y.values,
-            'mdd_end': dd_end_y.values,
-            'mdd_dur': dd_dur_y.values,
-            'anntvr': tvr_y.values,
-            'winr': winr_y.values * 100,
-            'odd': odd_y.values,
-            'calmar': calmar_y.values,
+            'annret': ret_p.values * 100,
+            'annsp': sp_p.values,
+            'mdd': mdd_p.values * 100,
+            'mdd_start': [d.strftime('%Y%m%d') for d in dd_start_p],
+            'mdd_end': [d.strftime('%Y%m%d') for d in dd_end_p],
+            'mdd_dur': dd_dur_p.values,
+            'mdd_dur_start': [d.strftime('%Y%m%d') if pd.notna(d) else '' for d in dd_dur_start_p],
+            'mdd_dur_end': [d.strftime('%Y%m%d') if pd.notna(d) else '' for d in dd_dur_end_p],
+            'anntvr': tvr_p.values,
+            'winr': winr_p.values * 100,
+            'odd': odd_p.values,
+            'calmar': calmar_p.values,
         }, index=pd.MultiIndex.from_arrays([idx_from, idx_to], names=['from', 'to']))
-        # 追加全区间汇总行
-        out.loc[(dateindex[0], dateindex[-1]), :] = [
-            ret * 100, sp, mdd * 100, dd_start, dd_end, dd_dur,
+        out.loc[(dateindex[0].strftime('%Y%m%d'), dateindex[-1].strftime('%Y%m%d')), :] = [
+            ret * 100, sp, mdd * 100, dd_start.strftime('%Y%m%d'), dd_end.strftime('%Y%m%d'), dd_dur,
+            dd_dur_start.strftime('%Y%m%d') if pd.notna(dd_dur_start) else '',
+            dd_dur_end.strftime('%Y%m%d') if pd.notna(dd_dur_end) else '',
             tvr, winr * 100, odd, calmar,
         ]
         out = out.round(2)
-        if verbose:
-            pd.set_option('display.expand_frame_repr', False)
-            print(out)
-        return out
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.expand_frame_repr', False)
+        print(out)
+        return out if return_df else None
 
     def position_analysis(
         self,
@@ -455,10 +500,10 @@ class StrategyAnalyzer:
         bins: int,
         signal_col: str = 'zz1000',
         shift: int = 2,
-        start: str = '20180101',
-        end: str = '20260331',
-        verbose: bool = True,
-    ) -> pd.DataFrame:
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        return_df: bool = False,
+    ) -> Optional[pd.DataFrame]:
         """
         离散仓位单调性分析：统计不同绝对仓位水平下的策略表现。
 
@@ -474,41 +519,47 @@ class StrategyAnalyzer:
             dump 文件中的信号列名，默认 'zz1000'。
         shift : int
             信号前置天数，默认 2。
-        start, end : str
-            统计区间（YYYYMMDD）。
-        verbose : bool
-            是否打印结果。
+        start, end : str, optional
+            统计区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅打印）。
 
         Returns
         -------
-        pd.DataFrame
-            index 为 bin 标签，列：annret, annsp, wgt。
+        pd.DataFrame or None
         """
-        pnl = pd.read_pickle(f'{self.pnl_dir}/{eq_name}.pnl.pkl').query('@start <= index <= @end')['pnl']
-        signal = (pd.read_pickle(f'{self.dump_dir}/{eq_name}.pkl')
-                  .query('@start <= index <= @end')[signal_col]
-                  .shift(shift))
+        pnl_raw = pd.read_pickle(f'{self.pnl_dir}/{eq_name}.pnl.pkl')
+        signal_raw = pd.read_pickle(f'{self.dump_dir}/{eq_name}.pkl')
+        if start is None:
+            start = '20180101'
+        if end is None:
+            _ends = []
+            for _d in [pnl_raw, signal_raw]:
+                _m = _d.index.max()
+                _ends.append(_m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m))
+            end = max(_ends)
+        pnl = pnl_raw.query('@start <= index <= @end')['pnl']
+        signal = signal_raw.query('@start <= index <= @end')[signal_col].shift(shift)
         coef_ann = len(pnl) / 250
         records = []
         for i in range(0, bins + 1):
             r, s, n = self.annual_metric(pnl[signal.abs() == i / bins], coef_ann)
             records.append({'bin': f'{i}/{bins}', 'annret': r, 'annsp': s, 'wgt': n / len(pnl)})
         result = pd.DataFrame(records).set_index('bin')
-        if verbose:
-            for _, row in result.iterrows():
-                print(f"abs(pos)--{row.name}: annret {row['annret']:.2%}, "
-                      f"sp {row['annsp']:.2f}, len {row['wgt']:.2%}")
-        return result
+        for _, row in result.iterrows():
+            print(f"abs(pos)--{row.name}: annret {row['annret']:.2%}, "
+                  f"sp {row['annsp']:.2f}, len {row['wgt']:.2%}")
+        return result if return_df else None
 
     def exposure_analysis(
         self,
         port_sig_name: str,
         sub_sig_list: List[str],
         signal_col: str = 'zz1000',
-        start: str = '20180101',
-        end: str = '20260331',
-        verbose: bool = True,
-    ) -> pd.Series:
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        return_df: bool = False,
+    ) -> Optional[pd.Series]:
         """
         仓位暴露度分析：计算子策略信号在组合信号上的暴露度（内积均值）。
 
@@ -520,36 +571,44 @@ class StrategyAnalyzer:
             子策略文件名列表。
         signal_col : str
             dump 文件中的信号列名，默认 'zz1000'。
-        start, end : str
-            统计区间（YYYYMMDD）。
-        verbose : bool
-            是否打印结果。
+        start, end : str, optional
+            统计区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
+        return_df : bool
+            是否返回结果 Series（默认 False，仅打印）。
 
         Returns
         -------
-        pd.Series
-            各子策略对组合的暴露度。
+        pd.Series or None
         """
-        port_sig = (pd.read_pickle(f'{self.dump_dir}/{port_sig_name}.pkl')
-                    .query('@start <= index <= @end')[signal_col])
+        port_sig_raw = pd.read_pickle(f'{self.dump_dir}/{port_sig_name}.pkl')
+        if start is None:
+            start = '20180101'
+        if end is None:
+            _ends = [port_sig_raw.index.max()]
+            for sub in sub_sig_list:
+                _m = pd.read_pickle(f'{self.dump_dir}/{sub}.pkl').index.max()
+                _ends.append(_m)
+            end = max(_ends)
+            end = end.strftime('%Y%m%d') if hasattr(end, 'strftime') else str(end)
+        port_sig = port_sig_raw.query('@start <= index <= @end')[signal_col]
         exposures = {}
         for sub in sub_sig_list:
             sub_sig = (pd.read_pickle(f'{self.dump_dir}/{sub}.pkl')
                        .query('@start <= index <= @end')[signal_col])
             exposures[sub] = (sub_sig * port_sig).mean()
         result = pd.Series(exposures, name='exposure')
-        if verbose:
-            for name, val in result.items():
-                print(f'{name} exposure: {val:.2f}')
-        return result
+        for name, val in result.items():
+            print(f'{name} exposure: {val:.2f}')
+        return result if return_df else None
 
     def correlation_analysis(
         self,
         check_id: str,
         checklist: Optional[List[str]] = None,
         start_date: Optional[str] = None,
-        verbose: bool = True,
-    ) -> pd.DataFrame:
+        end_date: Optional[str] = None,
+        return_df: bool = False,
+    ) -> Optional[pd.DataFrame]:
         """
         策略间相关性分析：对比指定策略与其他策略的日收益率相关性。
 
@@ -559,15 +618,14 @@ class StrategyAnalyzer:
             基准策略 ID（文件名不含 .pnl.pkl 后缀）。
         checklist : list of str, optional
             对比策略 ID 列表。若为 None 则自动发现 pnl 目录下所有其他策略。
-        start_date : str, optional
-            只保留此日期之后的数据（YYYYMMDD）。
-        verbose : bool
-            是否打印结果。
+        start_date, end_date : str, optional
+            时间区间（YYYYMMDD），默认 start_date='20180101'，end_date 不截断（使用数据自然结尾）。
+        return_df : bool
+            是否返回相关性矩阵（默认 False，仅打印）。
 
         Returns
         -------
-        pd.DataFrame
-            完整相关性矩阵。
+        pd.DataFrame or None
         """
         base = pd.read_pickle(f'{self.pnl_dir}/{check_id}.pnl.pkl')['pnl']
         base.name = check_id
@@ -587,15 +645,106 @@ class StrategyAnalyzer:
             compare.append(s)
 
         corr_df = pd.concat(compare, axis=1, join='inner')
-        if start_date:
-            corr_df = corr_df[pd.to_datetime(corr_df.index) >
-                              datetime.strptime(start_date, '%Y%m%d')]
+        if start_date is None:
+            start_date = '20180101'
+        corr_df = corr_df[pd.to_datetime(corr_df.index) >=
+                          datetime.strptime(start_date, '%Y%m%d')]
+        if end_date is not None:
+            corr_df = corr_df[pd.to_datetime(corr_df.index) <=
+                              datetime.strptime(end_date, '%Y%m%d')]
         corr_mat = corr_df.corr()
-        if verbose:
-            others = corr_df.drop(columns=[check_id]).corrwith(corr_df[check_id])
-            print(others)
-            print(corr_mat)
-        return corr_mat
+        others = corr_df.drop(columns=[check_id]).corrwith(corr_df[check_id])
+        print(others)
+        print(corr_mat)
+        return corr_mat if return_df else None
+
+    # ========================================================================
+    # Instance Methods — 可视化
+    # ========================================================================
+
+    def plot_curve(
+        self,
+        pnl_list: Union[str, List[str]],
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        labels: Optional[Union[str, List[str]]] = None,
+        benchmark: Optional[str] = None,
+        os_date: Optional[str] = None,
+        zone: str = '',
+        ax: Optional[plt.Axes] = None,
+    ):
+        """
+        策略净值曲线对比图，可选 benchmark 和样本内外划分线。
+
+        Parameters
+        ----------
+        pnl_list : str or list of str
+            策略 PnL 文件名（不含 .pnl.pkl 后缀），单个 str 或列表。
+        start, end : str, optional
+            统计区间（YYYYMMDD），默认 start='20180101'，end 为所有策略和 benchmark 中的最新日期。
+        labels : str or list of str, optional
+            策略显示标签，默认使用文件名。
+        benchmark : str, optional
+            基准指数 'hs300' / 'zz500' / 'zz1000'，读取 data 目录对应数据
+            计算每日收益率 cumsum 作为额外曲线。
+        os_date : str, optional
+            样本内外划分节点（YYYYMMDD），不一定为交易日，会自动寻找最近交易日。
+        zone : str
+            交易市场（'' 或 'hk'），用于读取 calendar。
+        ax : matplotlib Axes, optional
+            指定绘图轴。
+        """
+        if isinstance(pnl_list, str):
+            pnl_list = [pnl_list]
+            labels = [labels] if isinstance(labels, str) else labels
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(15, 6))
+
+        if labels is None:
+            labels = pnl_list
+
+        # Determine default end: latest date across all strategies and benchmark
+        if end is None:
+            _ends = []
+            for pid in pnl_list:
+                _tmp = pd.read_pickle(f'{self.pnl_dir}/{pid}.pnl.pkl')
+                _m = _tmp.index.max()
+                _ends.append(_m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m))
+            if benchmark is not None:
+                _tmp = pd.read_pickle(f'{self.data_dir}/{benchmark}.pkl')
+                _m = _tmp.index.max()
+                _ends.append(_m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m))
+            end = max(_ends)
+        if start is None:
+            start = '20180101'
+
+        # 策略净值曲线
+        for pid, label in zip(pnl_list, labels):
+            pnl = pd.read_pickle(f'{self.pnl_dir}/{pid}.pnl.pkl').query('@start <= index <= @end')
+            nav = pnl['pnl'].cumsum()
+            nav.index = pd.to_datetime(nav.index)
+            ax.plot(nav, label=label)
+
+        # benchmark 曲线
+        if benchmark is not None:
+            bm = pd.read_pickle(f'{self.data_dir}/{benchmark}.pkl').query('@start <= index <= @end')
+            bm_nav = bm['open'].pct_change().fillna(0).cumsum()
+            bm_nav.index = pd.to_datetime(bm_nav.index)
+            ax.plot(bm_nav, label=benchmark, linewidth=1.5, color='gray', alpha=0.7)
+
+        # 样本内外划分线
+        if os_date is not None:
+            zone_suffix = f'_{zone}' if zone else ''
+            calendar = pd.read_pickle(f'{self.data_dir}/calendar{zone_suffix}.pkl')
+            idx = calendar.searchsorted(os_date, 'left')
+            os_trading_day = pd.to_datetime(calendar.iloc[min(idx, len(calendar) - 1)])
+            ax.axvline(os_trading_day, color='black', linestyle='--', linewidth=1.2)
+
+        ax.legend()
+        ax.set_title('PnL Comparison', fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
 
     # ========================================================================
     # Data utilities — 市场数据辅助
@@ -613,15 +762,15 @@ class StrategyAnalyzer:
         return data_dict
 
     @classmethod
-    def stock_crowd_index(cls, start: str, end: str,
+    def stock_crowd_index(cls, start: Optional[str] = None, end: Optional[str] = None,
                           data_dir: str = './data') -> pd.DataFrame:
         """
         计算个股资金拥挤度指标：成交额前 10% 的股票占总成交额的比例。
 
         Parameters
         ----------
-        start, end : str
-            统计区间（YYYYMMDD）。
+        start, end : str, optional
+            统计区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
         data_dir : str
             数据目录。
 
@@ -630,6 +779,12 @@ class StrategyAnalyzer:
         pd.DataFrame
             列：crowd。
         """
+        if end is None:
+            _tmp = pd.read_pickle(f'{data_dir}/close.pkl')
+            _m = _tmp.index.max()
+            end = _m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m)
+        if start is None:
+            start = '20180101'
         data_dict = cls._load_data_dict(['close', 'amount'], start, end, data_dir)
         amt_rk = data_dict['amount'].rank(axis=1, pct=True)
         crowd = data_dict['amount'][amt_rk > 0.9].sum(1) / data_dict['amount'].sum(1)
