@@ -5,7 +5,7 @@
   - 条件收益率统计 (structure_stats / annual_stat)
   - 策略绩效回顾 (performance_review)
   - 多策略曲线对比 (pnl_compare)
-  - 分层测试 / Decile Analysis (decile_analysis)
+  - 分层测试 / Decile Analysis (market_indicate)
   - 滚动分布监控 (rolling_stats)
   - 离散仓位单调性分析 (position_analysis)
   - 仓位暴露度分析 (exposure_analysis)
@@ -257,37 +257,47 @@ class StrategyAnalyzer:
         return ret, sp, n
 
     @staticmethod
-    def decile_analysis(
+    def market_indicate(
         indicator: pd.Series,
-        pnl: pd.Series,
+        pnl: Union[str, pd.Series],
         n_groups: int = 5,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        indicator_name: str = '',
         ax: Optional[Union[plt.Axes, np.ndarray]] = None,
         return_df: bool = False,
+        pnl_dir: str = './pnl',
     ) -> Optional[pd.DataFrame]:
         """
-        分层测试（Decile Analysis）：按市场监控指标的分位数组统计策略表现。
+        市场指标分层测试：按市场监控指标的分位数组统计策略表现。
 
         Parameters
         ----------
         indicator : pd.Series
             市场监控指标（如波动率、换手率等）。
-        pnl : pd.Series
-            策略日收益率序列。
+        pnl : str or pd.Series
+            策略日收益率序列，或 PnL 文件名（不含 .pnl.pkl 后缀）。
         n_groups : int
             分组数量，默认 5。
         start_date, end_date : str, optional
             截取时间区间（YYYY-MM-DD 或 YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
+        indicator_name : str
+            指标名称，展示在图表标题中。
         ax : matplotlib Axes, optional
             指定绘图轴（需 2 个）。若为 None 则自动创建。
         return_df : bool
             是否返回结果 DataFrame（默认 False，仅绘图）。
+        pnl_dir : str
+            pnl 文件目录，仅 pnl 为 str 时有效，默认 './pnl'。
 
         Returns
         -------
         pd.DataFrame or None
         """
+        if isinstance(pnl, str):
+            pnl = pd.read_pickle(f'{pnl_dir}/{pnl}.pnl.pkl')['pnl']
+            if not indicator_name:
+                indicator_name = indicator.name or ''
         df = pd.concat([indicator.rename('indicator'), pnl.rename('pnl')], axis=1).dropna()
         if start_date is None:
             start_date = '20180101'
@@ -307,31 +317,33 @@ class StrategyAnalyzer:
             fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         else:
             axes = ax
-        title_prefix = f' ({start_date} to {end_date})'
+        date_tag = f' ({start_date} to {end_date})'
+        indicator_tag = f' [{indicator_name}]' if indicator_name else ''
         _plot_decile_bars(axes[0], result.index, result['annret'],
-                          f'Annualized Return by Indicator Quantiles{title_prefix}', '#4C72B0')
+                          f'Annualized Return by Indicator Quantiles{indicator_tag}{date_tag}', '#4C72B0')
         _plot_decile_bars(axes[1], result.index, result['sharpe'],
-                          f'Annualized Sharpe by Indicator Quantiles{title_prefix}', '#C44E52')
+                          f'Annualized Sharpe by Indicator Quantiles{indicator_tag}{date_tag}', '#C44E52')
         plt.tight_layout()
         plt.show()
         return result if return_df else None
 
     @staticmethod
     def rolling_stats(
-        pnl: pd.Series,
+        pnl: Union[str, pd.Series],
         window: int = 120,
         start: Optional[str] = None,
         end: Optional[str] = None,
         ax: Optional[Union[plt.Axes, np.ndarray]] = None,
         return_df: bool = False,
+        pnl_dir: str = './pnl',
     ) -> Optional[pd.DataFrame]:
         """
         PnL 滚动分布监控：滚动均值、标准差、偏度、峰度。
 
         Parameters
         ----------
-        pnl : pd.Series
-            策略日收益率序列。
+        pnl : str or pd.Series
+            策略日收益率序列，或 PnL 文件名（不含 .pnl.pkl 后缀）。
         window : int
             滚动窗口大小，默认 120。
         start, end : str, optional
@@ -340,11 +352,15 @@ class StrategyAnalyzer:
             指定绘图轴（需 4 个）。
         return_df : bool
             是否返回结果 DataFrame（默认 False，仅绘图）。
+        pnl_dir : str
+            pnl 文件目录，仅 pnl 为 str 时有效，默认 './pnl'。
 
         Returns
         -------
         pd.DataFrame or None
         """
+        if isinstance(pnl, str):
+            pnl = pd.read_pickle(f'{pnl_dir}/{pnl}.pnl.pkl')['pnl']
         if start is None:
             start = '20180101'
         if end is None:
@@ -358,15 +374,18 @@ class StrategyAnalyzer:
             'kurt': pnl.rolling(window).kurt(),
         })
         # always plot
+        plot_idx = pd.to_datetime(df.index) if not isinstance(df.index, pd.DatetimeIndex) else df.index
         if ax is None:
             fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
         else:
             axes = ax
         for i, col in enumerate(['mean', 'std', 'skew', 'kurt']):
-            axes[i].plot(df.index, df[col], linewidth=0.8)
+            axes[i].plot(plot_idx, df[col], linewidth=0.8)
             axes[i].set_ylabel(col)
             axes[i].grid(True, alpha=0.3)
+        axes[-1].set_xlabel('')
         axes[0].set_title(f'Rolling Stats (window={window})')
+        plt.subplots_adjust(hspace=0.05)
         plt.tight_layout()
         plt.show()
         return df if return_df else None
@@ -505,7 +524,7 @@ class StrategyAnalyzer:
         return_df: bool = False,
     ) -> Optional[pd.DataFrame]:
         """
-        离散仓位单调性分析：统计不同绝对仓位水平下的策略表现。
+        离散仓位单调性分析：统计不同绝对仓位水平下的策略表现，针对连续仓位信号。
 
         按信号绝对值等距分为 (bins+1) 档，计算每档的年化收益、夏普和权重。
 
@@ -798,5 +817,5 @@ class StrategyAnalyzer:
 structure_stats = StrategyAnalyzer.structure_stats
 annual_stat = StrategyAnalyzer.annual_stat
 annual_metric = StrategyAnalyzer.annual_metric
-decile_analysis = StrategyAnalyzer.decile_analysis
+market_indicate = StrategyAnalyzer.market_indicate
 rolling_stats = StrategyAnalyzer.rolling_stats

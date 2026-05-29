@@ -4,15 +4,15 @@ import importlib
 import os
 
 # beta_list = [f[:-3] for f in os.listdir('./beta') if f.startswith('beta') and f.endswith('.py')]
-# beta_list = ['timing6']
-# beta_list = ['hk1']
-beta_list = ['timing1', 'timing2', 'timing3', 'timing4', 'timing5', 'timingc_v1', 'timingc_v2', 'timingc_v3']
+beta_list = ['timing1_v1']
+# beta_list = ['timing1', 'timing2', 'timing3', 'timing4', 'timing5', 'timing6', 'timing7', 
+            #  'timingc_v1_eq', 'timingc_v1', 'timingc_v2_eq', 'timingc_v2', 'timingc_v3_eq', 'timingc_v3']
 
 # mode:0——重写，1——更新
-mode = 1
+mode = 0
 
-cfg = {'startdate': '20251201',
-       'enddate': '20251231',
+cfg = {'startdate': '20180101',
+       'enddate': '20260430',
        'instruments': ['zz1000', 'zz500', 'hs300', 'sz50'],
     #    'instruments': ['hsi', 'hstech'],
     #    'zone': 'hk'

@@ -5,14 +5,14 @@ import os
 
 # beta_list = [f[:-3] for f in os.listdir('./beta') if f.startswith('beta') and f.endswith('.py')]
 # beta_list = ['etftiming2']
-beta_list = ['stockplus']
-# beta_list = ['stocktiming1','stocktiming2','stocktiming3','stocktiming4','stocktiming5', 'stocktiming6', 'stockplus']
+# beta_list = ['stockplus']
+beta_list = ['stocktiming1','stocktiming2','stocktiming3','stocktiming4','stocktiming5', 'stocktiming6', 'stockplus']
 
 # mode:0——重写，1——更新
 mode = 1
 
-cfg = {'startdate': '20251101',
-       'enddate': '20251130',
+cfg = {'startdate': '20260101',
+       'enddate': '20260228',
     #    'period': 1,
        }
 
