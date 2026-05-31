@@ -6,13 +6,13 @@ import os
 # beta_list = [f[:-3] for f in os.listdir('./beta') if f.startswith('beta') and f.endswith('.py')]
 # beta_list = ['timing6']
 # beta_list = ['hk1']
-beta_list = ['timing1', 'timing2', 'timing3', 'timing4', 'timing5', 'timingc_v1', 'timingc_v2', 'timingc_v3']
+beta_list = ['timing1', 'timing2', 'timing3', 'timing4', 'timing5', 'timing6', 'timing7', 'timingc_v1', 'timingc_v2', 'timingc_v3']
 
 # mode:0——重写，1——更新
-mode = 1
+mode = 0
 
-cfg = {'startdate': '20251201',
-       'enddate': '20251231',
+cfg = {'startdate': '20180101',
+       'enddate': '20260430',
        'instruments': ['zz1000', 'zz500', 'hs300', 'sz50'],
     #    'instruments': ['hsi', 'hstech'],
     #    'zone': 'hk'
@@ -26,12 +26,16 @@ for beta_file in beta_list:
         beta = beta_class(cfg)
         beta.process()
         if mode:
-            old = pd.read_pickle(f'./dump/{beta_file}.pkl')
-            new = beta.signal_df.copy()
-            new_index = new.index.difference(old.index)
-            if len(new_index) > 0:
-                new = new.loc[new_index]
-                beta.signal_df = pd.concat([old, new], axis=0, join='outer')
+            old_path = f'./dump/{beta_file}.pkl'
+            if os.path.exists(old_path):
+                old = pd.read_pickle(old_path)
+                new = beta.signal_df.copy()
+                new_index = new.index.difference(old.index)
+                if len(new_index) > 0:
+                    new = new.loc[new_index]
+                    beta.signal_df = pd.concat([old, new], axis=0, join='outer')
+                    beta.dump()
+            else:
                 beta.dump()
         else:
             beta.dump()
