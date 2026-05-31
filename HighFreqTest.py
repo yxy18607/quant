@@ -7,18 +7,18 @@ exec(f'from beta.{signal_id} import {signal_id}')
 # instruments = pd.read_csv('./derivative_data/activeetf.csv')['代码'].tolist()
 instruments = pd.read_csv('./derivative_data/etflist.csv')['f_info_windcode'].tolist()
 
-cfg = {'startdate': '20180101',
-       'enddate': '20251017',
+cfg = {'startdate': '20251201',
+       'enddate': '20260228',
        'signal_id': signal_id,
        'instruments': instruments,
        'fee': 0.00005,
        'load_unit': '60m',
        'dump_factor': True,
        'dump_pnl': True,
-       'update': False,
+       'update': True,
        'category': 'etf',
        'trainT': 0,
-       'siglist': ['etftiming2', 'etftiming3'],
+       'siglist': ['etf1h_2', 'etf1h_3'],
        'retrain_period': 'D',
        'factor_type': 'pos'
        }
