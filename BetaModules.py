@@ -34,7 +34,7 @@ class DailyCTA:
     slippage: float = 0.
     fee: float = 0.
     pnl_period: str = 'Y'
-    dump_pnl: bool = True
+    dump_pnl: bool = False
     update: bool = False
 
     def __post_init__(self):
@@ -128,7 +128,12 @@ class DailyCTA:
         mdd = dd_T.max()
         dd_end = dd_T.idxmax()
         dd_start = nav[:dd_end].idxmax()
-        dd_duration = np.bincount(nav.cummax().diff().astype(bool).cumsum()).max()
+        regime_ids = nav.cummax().diff().astype(bool).cumsum()
+        regime_counts = np.bincount(regime_ids)
+        dd_duration = regime_counts.max()
+        longest_regime = np.argmax(regime_counts)
+        dd_dur_start = nav.index[regime_ids == longest_regime][0]
+        dd_dur_end = nav.index[regime_ids == longest_regime][-1]
         profit = pnl[pnl>0]; loss = pnl[pnl<0]
         winr = len(profit)/(len(profit)+len(loss))
         odd = -profit.mean()/loss.mean()
@@ -152,12 +157,30 @@ class DailyCTA:
         pnl_y = gpnl['pnl']; nav_y = gpnl['nav']
         ret_y = pnl_y.mean() * 250
         sp_y = pnl_y.mean() / pnl_y.std() * np.sqrt(250)
-        mdd_y = nav_y.apply(lambda x: (x.cummax()-x).max())
-        dd_end_y = nav_y.apply(lambda x: (x.cummax()-x).idxmax())
-        dd_start_y = nav_y.apply(lambda x: x[:dd_end_y[x.name]].idxmax())
-        dd_duration_y = nav_y.apply(lambda g: np.bincount(g.cummax().diff().astype(bool).cumsum()).max())
-        winr_y = pnl_y.apply(lambda x: (x>0).sum()/((x>0).sum()+(x<0).sum()))
-        odd_y = -pnl_y.apply(lambda x: x[x>0].mean() / x[x<0].mean())
+
+        def _nav_stats(g):
+            dd = g.cummax() - g
+            rids = g.cummax().diff().astype(bool).cumsum()
+            cnt = np.bincount(rids)
+            lid = np.argmax(cnt)
+            return (dd.max(), dd.idxmax(), g[:dd.idxmax()].idxmax(),
+                    cnt.max(), g.index[rids == lid][0], g.index[rids == lid][-1])
+
+        nav_stats = nav_y.apply(_nav_stats)
+        mdd_y = nav_stats.str[0]
+        dd_end_y = nav_stats.str[1]
+        dd_start_y = nav_stats.str[2]
+        dd_duration_y = nav_stats.str[3]
+        dd_dur_start_y = nav_stats.str[4]
+        dd_dur_end_y = nav_stats.str[5]
+
+        pnl_stats = pnl_y.apply(lambda x: (
+            (x>0).sum()/((x>0).sum()+(x<0).sum()),
+            -x[x>0].mean() / x[x<0].mean()
+        ))
+        winr_y = pnl_stats.str[0]
+        odd_y = pnl_stats.str[1]
+
         calmar_y = ret_y / mdd_y
         tvr_y = gpnl['dpos'].mean() * 250
 
@@ -170,11 +193,13 @@ class DailyCTA:
                             'dd_start': dd_start_y.values,
                             'dd_end': dd_end_y.values,
                             'dd_duration': dd_duration_y.values,
+                            'dd_dur_start': dd_dur_start_y.values,
+                            'dd_dur_end': dd_dur_end_y.values,
                             'anntvr': tvr_y.values,
                             'winr': winr_y.values*100,
                             'odd': odd_y.values,
                             'calmar': calmar_y.values}, index=pd.MultiIndex.from_arrays([index1, index2], names=['from', 'to']))
-        out.loc[(self.pnl.index[0], self.pnl.index[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, dd_duration, tvr, winr*100, odd, calmar]
+        out.loc[(self.pnl.index[0], self.pnl.index[-1]), :] = [ret*100, sp, mdd*100, dd_start, dd_end, dd_duration, dd_dur_start, dd_dur_end, tvr, winr*100, odd, calmar]
         print(out)
 
 
