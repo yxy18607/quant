@@ -4,7 +4,7 @@
 提供量化策略分析常用功能：
   - 条件收益率统计 (structure_stats / annual_stat)
   - 策略绩效回顾 (performance_review)
-  - 多策略曲线对比 (pnl_compare)
+  - 多策略曲线对比 (plot_curve)
   - 分层测试 / Decile Analysis (market_indicate)
   - 滚动分布监控 (rolling_stats)
   - 离散仓位单调性分析 (position_analysis)
@@ -30,17 +30,17 @@ from datetime import datetime
 from typing import List, Optional, Union, Tuple
 
 
+TRADING_DAYS = 250  # A股年交易日数
+DEFAULT_START = '20180101'
+
+# Shared format for stats printing — override kelly precision per caller
+_STATS_FMT = {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
+              'odd': '.4f', 'kelly': '.4f', 'annsp': '.2f'}
+
+
 # ============================================================================
 # Internal helpers
 # ============================================================================
-
-def _dd_duration(nav: pd.Series) -> int:
-    """计算最长回撤持续天数（峰值到恢复的交易日数）。"""
-    diff = nav.cummax().diff()
-    groups = diff.fillna(1).astype(bool).cumsum()
-    counts = np.bincount(groups)
-    return counts.max() if len(counts) > 0 else 0
-
 
 def _dd_info(nav: pd.Series) -> Tuple[int, object, object]:
     """计算最长回撤持续天数及起止日期。返回 (duration, start, end)。"""
@@ -89,19 +89,10 @@ def _fmt_print(df: pd.DataFrame, fmt: dict):
     print(out)
 
 
-def _make_period_col(index: pd.Index, period: str) -> pd.Series:
-    """根据自然日周期生成分组标签列（不随起始日平移）。"""
-    s = pd.Series(index, index=index)
-    if period == 'Y':
-        return s.str[:4]
-    elif period == 'M':
-        return s.str[:6]
-    elif period == 'Q':
-        return s.str[:4] + ((s.str[4:6].astype(int) - 1) // 3).astype(str)
-    elif period == 'H':
-        return s.str[:4] + (s.str[4:6].astype(int) // 7).astype(str)
-    else:
-        raise ValueError(f"period 须为 'M'/'Q'/'H'/'Y'，当前: {period}")
+def _max_date_str(series_or_df) -> str:
+    """从 pandas 对象的 index 提取最大日期字符串 (YYYYMMDD)。"""
+    m = series_or_df.index.max()
+    return m.strftime('%Y%m%d') if hasattr(m, 'strftime') else str(m)
 
 
 # ============================================================================
@@ -150,7 +141,7 @@ class StrategyAnalyzer:
         -------
         pd.DataFrame or None
         """
-        ann_div = len(fret) / 250
+        ann_div = len(fret) / TRADING_DAYS
         records = []
         for state in states:
             sf = fret[state]
@@ -178,8 +169,7 @@ class StrategyAnalyzer:
                 'annsp': np.abs(sf.mean() / sf.std()) * np.sqrt(n / ann_div) if sf.std() > 0 else 0,
             })
         result = pd.DataFrame(records, index=np.arange(1, len(states) + 1))
-        _fmt_print(result, {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
-                            'odd': '.4f', 'kelly': '.4f', 'annsp': '.2f'})
+        _fmt_print(result, _STATS_FMT)
         return result if return_df else None
 
     @staticmethod
@@ -206,7 +196,7 @@ class StrategyAnalyzer:
         _fret_year = fret.index.str[:4]
         ann_num = (pd.DataFrame({'fret': fret, 'year': _fret_year})
                    .groupby('year')['fret'].count())
-        ann_div = ann_num / 250
+        ann_div = ann_num / TRADING_DAYS
         group = df.groupby('year')['fret']
         count = group.count()
         annret = group.mean() * count / ann_div
@@ -229,8 +219,9 @@ class StrategyAnalyzer:
             'kelly': kelly,
             'annsp': annsp,
         })
-        _fmt_print(result, {'wgt': '%', 'annret': '%', 'annstd': '%', 'winr': '%',
-                            'odd': '.4f', 'kelly': '.2f', 'annsp': '.2f'})
+        fmt = dict(_STATS_FMT)
+        fmt['kelly'] = '.2f'
+        _fmt_print(result, fmt)
         return result if return_df else None
 
     @staticmethod
@@ -243,7 +234,7 @@ class StrategyAnalyzer:
         pnl : pd.Series
             日收益率序列。
         coef_ann : float
-            年化系数，通常为 len(全样本) / 250。
+            年化系数，通常为 len(全样本) / TRADING_DAYS。
 
         Returns
         -------
@@ -257,6 +248,76 @@ class StrategyAnalyzer:
         return ret, sp, n
 
     @staticmethod
+    def perf_percentile(
+        perf_df: pd.DataFrame,
+        metrics: Optional[List[str]] = None,
+        return_df: bool = False,
+    ) -> Optional[pd.DataFrame]:
+        """
+        计算各周期指标的历史分位值，评估最新一期表现的相对位置。
+
+        对 performance_review 输出的 DataFrame，取最新一期各项指标，
+        计算其在所有历史周期中的分位水平（% of periods worse than current），
+        辅助判断策略是否出现失效迹象。
+
+        Parameters
+        ----------
+        perf_df : pd.DataFrame
+            performance_review 的输出。
+        metrics : list of str, optional
+            要评估的指标列名，默认 ['annret','annsp','mdd','mdd_dur','winr','odd','calmar']。
+        return_df : bool
+            是否返回结果 DataFrame（默认 False，仅打印）。
+
+        Returns
+        -------
+        pd.DataFrame or None
+        """
+        if metrics is None:
+            metrics = ['annret', 'annsp', 'mdd', 'mdd_dur', 'winr', 'odd', 'calmar']
+
+        hist = perf_df.iloc[:-1]  # 排除最后一行全区间汇总
+        if len(hist) == 0:
+            print("无历史周期数据")
+            return None
+
+        latest = hist.iloc[-1]
+        total = len(hist)
+        higher_better = {'annret', 'annsp', 'winr', 'odd', 'calmar'}
+
+        records = []
+        for col in metrics:
+            if col not in perf_df.columns:
+                continue
+            vals = hist[col]
+            cur = latest[col]
+            pct = (vals < cur).mean() * 100  # % of history worse than current
+
+            if col in higher_better:
+                flag = 'LOW' if pct < 25 else ('OK' if pct >= 50 else '--')
+            else:
+                flag = 'LOW' if pct > 75 else ('OK' if pct <= 50 else '--')
+
+            records.append({
+                'latest': cur,
+                'mean': vals.mean(),
+                'median': vals.median(),
+                'min': vals.min(),
+                'max': vals.max(),
+                'pct_rank': pct,
+                'flag': flag,
+            })
+
+        result = pd.DataFrame(records, index=[c for c in metrics if c in perf_df.columns])
+        result = result.round({'latest': 2, 'mean': 2, 'median': 2, 'min': 2, 'max': 2, 'pct_rank': 1})
+
+        latest_label = f'{latest.name[0]}-{latest.name[1]}' if isinstance(latest.name, tuple) else str(latest.name)
+        print(f'Latest period: {latest_label}  |  Historical periods: {total}')
+        pd.set_option('display.expand_frame_repr', False)
+        print(result)
+        return result if return_df else None
+
+    @staticmethod
     def market_indicate(
         indicator: pd.Series,
         pnl: Union[str, pd.Series],
@@ -265,6 +326,7 @@ class StrategyAnalyzer:
         end_date: Optional[str] = None,
         indicator_name: str = '',
         ax: Optional[Union[plt.Axes, np.ndarray]] = None,
+        plot: bool = True,
         return_df: bool = False,
         pnl_dir: str = './pnl',
     ) -> Optional[pd.DataFrame]:
@@ -285,6 +347,8 @@ class StrategyAnalyzer:
             指标名称，展示在图表标题中。
         ax : matplotlib Axes, optional
             指定绘图轴（需 2 个）。若为 None 则自动创建。
+        plot : bool
+            是否绘图，默认 True。
         return_df : bool
             是否返回结果 DataFrame（默认 False，仅绘图）。
         pnl_dir : str
@@ -300,31 +364,33 @@ class StrategyAnalyzer:
                 indicator_name = indicator.name or ''
         df = pd.concat([indicator.rename('indicator'), pnl.rename('pnl')], axis=1).dropna()
         if start_date is None:
-            start_date = '20180101'
+            start_date = DEFAULT_START
         if end_date is None:
-            end_date = df.index.max().strftime('%Y%m%d') if hasattr(df.index.max(), 'strftime') else str(df.index.max())
+            end_date = _max_date_str(df)
         df = df.loc[start_date:end_date]
         df['group'] = pd.qcut(df['indicator'], q=n_groups,
                               labels=[f'G{i + 1}' for i in range(n_groups)],
                               duplicates='drop')
-        result = pd.DataFrame({
-            'annret': df.groupby('group', observed=True)['pnl'].apply(lambda x: x.mean() * 252),
-            'sharpe': df.groupby('group', observed=True)['pnl'].apply(
-                lambda x: x.mean() / x.std() * np.sqrt(252) if x.std() > 0 else 0),
-        })
-        # always plot
-        if ax is None:
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        else:
-            axes = ax
-        date_tag = f' ({start_date} to {end_date})'
-        indicator_tag = f' [{indicator_name}]' if indicator_name else ''
-        _plot_decile_bars(axes[0], result.index, result['annret'],
-                          f'Annualized Return by Indicator Quantiles{indicator_tag}{date_tag}', '#4C72B0')
-        _plot_decile_bars(axes[1], result.index, result['sharpe'],
-                          f'Annualized Sharpe by Indicator Quantiles{indicator_tag}{date_tag}', '#C44E52')
-        plt.tight_layout()
-        plt.show()
+        # single agg for both annret and sharpe
+        grouped = df.groupby('group', observed=True)['pnl']
+        result = grouped.agg(
+            annret=lambda x: x.mean() * TRADING_DAYS,
+            sharpe=lambda x: x.mean() / x.std() * np.sqrt(TRADING_DAYS) if x.std() > 0 else 0,
+        )
+        # plot
+        if plot:
+            if ax is None:
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            else:
+                axes = ax
+            date_tag = f' ({start_date} to {end_date})'
+            indicator_tag = f' [{indicator_name}]' if indicator_name else ''
+            _plot_decile_bars(axes[0], result.index, result['annret'],
+                              f'Annualized Return by Indicator Quantiles{indicator_tag}{date_tag}', '#4C72B0')
+            _plot_decile_bars(axes[1], result.index, result['sharpe'],
+                              f'Annualized Sharpe by Indicator Quantiles{indicator_tag}{date_tag}', '#C44E52')
+            plt.tight_layout()
+            plt.show()
         return result if return_df else None
 
     @staticmethod
@@ -334,6 +400,7 @@ class StrategyAnalyzer:
         start: Optional[str] = None,
         end: Optional[str] = None,
         ax: Optional[Union[plt.Axes, np.ndarray]] = None,
+        plot: bool = True,
         return_df: bool = False,
         pnl_dir: str = './pnl',
     ) -> Optional[pd.DataFrame]:
@@ -350,6 +417,8 @@ class StrategyAnalyzer:
             截取时间区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
         ax : matplotlib Axes, optional
             指定绘图轴（需 4 个）。
+        plot : bool
+            是否绘图，默认 True。
         return_df : bool
             是否返回结果 DataFrame（默认 False，仅绘图）。
         pnl_dir : str
@@ -362,32 +431,32 @@ class StrategyAnalyzer:
         if isinstance(pnl, str):
             pnl = pd.read_pickle(f'{pnl_dir}/{pnl}.pnl.pkl')['pnl']
         if start is None:
-            start = '20180101'
+            start = DEFAULT_START
         if end is None:
-            end = pnl.index.max().strftime('%Y%m%d') if hasattr(pnl.index.max(), 'strftime') else str(pnl.index.max())
-        pnl = pnl[start:end]
-        pnl = pnl.dropna()
+            end = _max_date_str(pnl)
+        pnl = pnl[start:end].dropna()
         df = pd.DataFrame({
             'mean': pnl.rolling(window).mean(),
             'std': pnl.rolling(window).std(),
             'skew': pnl.rolling(window).skew(),
             'kurt': pnl.rolling(window).kurt(),
         })
-        # always plot
-        plot_idx = pd.to_datetime(df.index) if not isinstance(df.index, pd.DatetimeIndex) else df.index
-        if ax is None:
-            fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
-        else:
-            axes = ax
-        for i, col in enumerate(['mean', 'std', 'skew', 'kurt']):
-            axes[i].plot(plot_idx, df[col], linewidth=0.8)
-            axes[i].set_ylabel(col)
-            axes[i].grid(True, alpha=0.3)
-        axes[-1].set_xlabel('')
-        axes[0].set_title(f'Rolling Stats (window={window})')
-        plt.subplots_adjust(hspace=0.05)
-        plt.tight_layout()
-        plt.show()
+        # plot
+        if plot:
+            plot_idx = pd.to_datetime(df.index) if not isinstance(df.index, pd.DatetimeIndex) else df.index
+            if ax is None:
+                fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
+            else:
+                axes = ax
+            for i, col in enumerate(['mean', 'std', 'skew', 'kurt']):
+                axes[i].plot(plot_idx, df[col], linewidth=0.8)
+                axes[i].set_ylabel(col)
+                axes[i].grid(True, alpha=0.3)
+            axes[-1].set_xlabel('')
+            axes[0].set_title(f'Rolling Stats (window={window})')
+            plt.subplots_adjust(hspace=0.05)
+            plt.tight_layout()
+            plt.show()
         return df if return_df else None
 
     # ========================================================================
@@ -400,6 +469,7 @@ class StrategyAnalyzer:
         start: Optional[str] = None,
         end: Optional[str] = None,
         period: str = 'Y',
+        verbose: bool = True,
         return_df: bool = False,
     ) -> Optional[pd.DataFrame]:
         """
@@ -414,6 +484,8 @@ class StrategyAnalyzer:
             统计区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
         period : str
             统计周期：'M' 月 / 'Q' 季 / 'H' 半年 / 'Y' 年（默认）。
+        verbose : bool
+            是否打印结果 DataFrame，默认 True。
         return_df : bool
             是否返回结果 DataFrame（默认 False，仅打印）。
 
@@ -424,9 +496,9 @@ class StrategyAnalyzer:
         if isinstance(pnl, str):
             pnl = pd.read_pickle(f'{self.pnl_dir}/{pnl}.pnl.pkl')
         if start is None:
-            start = '20180101'
+            start = DEFAULT_START
         if end is None:
-            end = pnl.index.max().strftime('%Y%m%d') if hasattr(pnl.index.max(), 'strftime') else str(pnl.index.max())
+            end = _max_date_str(pnl)
         pnl = pnl.query('@start <= index <= @end').copy()
         pnl.index = pd.to_datetime(pnl.index)
         dateindex = pnl.index
@@ -445,26 +517,26 @@ class StrategyAnalyzer:
         has_dpos = 'dpos' in pnl.columns
 
         # --- 全区间 ---
-        ret = pnl['pnl'].mean() * 250
-        sp = pnl['pnl'].mean() / pnl['pnl'].std() * np.sqrt(250) if pnl['pnl'].std() > 0 else 0
+        ret = pnl['pnl'].mean() * TRADING_DAYS
+        sp = pnl['pnl'].mean() / pnl['pnl'].std() * np.sqrt(TRADING_DAYS) if pnl['pnl'].std() > 0 else 0
         pnl['dd_T'] = pnl['nav'].cummax() - pnl['nav']
         mdd = pnl['dd_T'].max()
         dd_end = pnl['dd_T'].idxmax()
         dd_start = pnl.loc[:dd_end, 'nav'].idxmax()
         dd_dur, dd_dur_start, dd_dur_end = _dd_info(pnl['nav'])
-        pos = pnl['pnl'] > 0
-        neg = pnl['pnl'] < 0
-        n_pos, n_neg = pos.sum(), neg.sum()
-        winr = n_pos / (n_pos + n_neg) if (n_pos + n_neg) > 0 else 0
-        odd = -pnl.loc[pos, 'pnl'].mean() / pnl.loc[neg, 'pnl'].mean() if n_neg > 0 else np.inf
+        n_pos = (pnl['pnl'] > 0).sum()
+        n_neg = (pnl['pnl'] < 0).sum()
+        total_trades = n_pos + n_neg
+        winr = n_pos / total_trades if total_trades > 0 else 0
+        odd = -pnl.loc[pnl['pnl'] > 0, 'pnl'].mean() / pnl.loc[pnl['pnl'] < 0, 'pnl'].mean() if n_neg > 0 else np.inf
         calmar = ret / mdd if mdd > 0 else np.inf
-        tvr = pnl['dpos'].mean() * 250 if has_dpos else np.nan
+        tvr = pnl['dpos'].mean() * TRADING_DAYS if has_dpos else np.nan
 
         # --- 按周期 ---
         gpnl = pnl.groupby('period')
         pnl['dd_p'] = gpnl['nav'].cummax() - pnl['nav']
-        ret_p = gpnl['pnl'].mean() * 250
-        sp_p = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(250)
+        ret_p = gpnl['pnl'].mean() * TRADING_DAYS
+        sp_p = gpnl['pnl'].mean() / gpnl['pnl'].std() * np.sqrt(TRADING_DAYS)
         mdd_p = gpnl['dd_p'].max()
         dd_end_p = gpnl['dd_p'].idxmax()
         dd_start_p = gpnl.apply(
@@ -482,7 +554,7 @@ class StrategyAnalyzer:
         odd_p = -gpnl['pnl'].apply(
             lambda x: x[x > 0].mean() / x[x < 0].mean() if (x < 0).sum() > 0 else np.inf)
         calmar_p = ret_p / mdd_p.replace(0, np.nan)
-        tvr_p = gpnl['dpos'].mean() * 250 if has_dpos else pd.Series(np.nan, index=ret_p.index)
+        tvr_p = gpnl['dpos'].mean() * TRADING_DAYS if has_dpos else pd.Series(np.nan, index=ret_p.index)
 
         # --- 组装 ---
         idx_from = [d.strftime('%Y%m%d') for d in gpnl.head(1).index]
@@ -508,9 +580,10 @@ class StrategyAnalyzer:
             tvr, winr * 100, odd, calmar,
         ]
         out = out.round(2)
-        pd.set_option('display.max_rows', None)
-        pd.set_option('display.expand_frame_repr', False)
-        print(out)
+        if verbose:
+            pd.set_option('display.max_rows', None)
+            pd.set_option('display.expand_frame_repr', False)
+            print(out)
         return out if return_df else None
 
     def position_analysis(
@@ -550,16 +623,12 @@ class StrategyAnalyzer:
         pnl_raw = pd.read_pickle(f'{self.pnl_dir}/{eq_name}.pnl.pkl')
         signal_raw = pd.read_pickle(f'{self.dump_dir}/{eq_name}.pkl')
         if start is None:
-            start = '20180101'
+            start = DEFAULT_START
         if end is None:
-            _ends = []
-            for _d in [pnl_raw, signal_raw]:
-                _m = _d.index.max()
-                _ends.append(_m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m))
-            end = max(_ends)
+            end = max(_max_date_str(pnl_raw), _max_date_str(signal_raw))
         pnl = pnl_raw.query('@start <= index <= @end')['pnl']
         signal = signal_raw.query('@start <= index <= @end')[signal_col].shift(shift)
-        coef_ann = len(pnl) / 250
+        coef_ann = len(pnl) / TRADING_DAYS
         records = []
         for i in range(0, bins + 1):
             r, s, n = self.annual_metric(pnl[signal.abs() == i / bins], coef_ann)
@@ -599,21 +668,21 @@ class StrategyAnalyzer:
         -------
         pd.Series or None
         """
-        port_sig_raw = pd.read_pickle(f'{self.dump_dir}/{port_sig_name}.pkl')
+        # Load all files once, determining end from cached data
+        sub_dfs = {}
+        _ends = []
+        for name in sub_sig_list + [port_sig_name]:
+            df = pd.read_pickle(f'{self.dump_dir}/{name}.pkl')
+            sub_dfs[name] = df
+            _ends.append(_max_date_str(df))
         if start is None:
-            start = '20180101'
+            start = DEFAULT_START
         if end is None:
-            _ends = [port_sig_raw.index.max()]
-            for sub in sub_sig_list:
-                _m = pd.read_pickle(f'{self.dump_dir}/{sub}.pkl').index.max()
-                _ends.append(_m)
             end = max(_ends)
-            end = end.strftime('%Y%m%d') if hasattr(end, 'strftime') else str(end)
-        port_sig = port_sig_raw.query('@start <= index <= @end')[signal_col]
+        port_sig = sub_dfs[port_sig_name].query('@start <= index <= @end')[signal_col]
         exposures = {}
         for sub in sub_sig_list:
-            sub_sig = (pd.read_pickle(f'{self.dump_dir}/{sub}.pkl')
-                       .query('@start <= index <= @end')[signal_col])
+            sub_sig = sub_dfs[sub].query('@start <= index <= @end')[signal_col]
             exposures[sub] = (sub_sig * port_sig).mean()
         result = pd.Series(exposures, name='exposure')
         for name, val in result.items():
@@ -665,7 +734,7 @@ class StrategyAnalyzer:
 
         corr_df = pd.concat(compare, axis=1, join='inner')
         if start_date is None:
-            start_date = '20180101'
+            start_date = DEFAULT_START
         corr_df = corr_df[pd.to_datetime(corr_df.index) >=
                           datetime.strptime(start_date, '%Y%m%d')]
         if end_date is not None:
@@ -722,31 +791,33 @@ class StrategyAnalyzer:
         if labels is None:
             labels = pnl_list
 
-        # Determine default end: latest date across all strategies and benchmark
+        # Cache loaded data to avoid double-reads for end detection + plotting
+        pnl_cache = {}
+        for pid in pnl_list:
+            pnl_cache[pid] = pd.read_pickle(f'{self.pnl_dir}/{pid}.pnl.pkl')
+        bm_cache = None
+        if benchmark is not None:
+            bm_cache = pd.read_pickle(f'{self.data_dir}/{benchmark}.pkl')
+
+        # Determine default end
         if end is None:
-            _ends = []
-            for pid in pnl_list:
-                _tmp = pd.read_pickle(f'{self.pnl_dir}/{pid}.pnl.pkl')
-                _m = _tmp.index.max()
-                _ends.append(_m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m))
-            if benchmark is not None:
-                _tmp = pd.read_pickle(f'{self.data_dir}/{benchmark}.pkl')
-                _m = _tmp.index.max()
-                _ends.append(_m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m))
+            _ends = [_max_date_str(v) for v in pnl_cache.values()]
+            if bm_cache is not None:
+                _ends.append(_max_date_str(bm_cache))
             end = max(_ends)
         if start is None:
-            start = '20180101'
+            start = DEFAULT_START
 
         # 策略净值曲线
         for pid, label in zip(pnl_list, labels):
-            pnl = pd.read_pickle(f'{self.pnl_dir}/{pid}.pnl.pkl').query('@start <= index <= @end')
+            pnl = pnl_cache[pid].query('@start <= index <= @end')
             nav = pnl['pnl'].cumsum()
             nav.index = pd.to_datetime(nav.index)
             ax.plot(nav, label=label)
 
         # benchmark 曲线
-        if benchmark is not None:
-            bm = pd.read_pickle(f'{self.data_dir}/{benchmark}.pkl').query('@start <= index <= @end')
+        if bm_cache is not None:
+            bm = bm_cache.query('@start <= index <= @end')
             bm_nav = bm['open'].pct_change().fillna(0).cumsum()
             bm_nav.index = pd.to_datetime(bm_nav.index)
             ax.plot(bm_nav, label=benchmark, linewidth=1.5, color='gray', alpha=0.7)
@@ -780,36 +851,6 @@ class StrategyAnalyzer:
             data_dict[name] = df
         return data_dict
 
-    @classmethod
-    def stock_crowd_index(cls, start: Optional[str] = None, end: Optional[str] = None,
-                          data_dir: str = './data') -> pd.DataFrame:
-        """
-        计算个股资金拥挤度指标：成交额前 10% 的股票占总成交额的比例。
-
-        Parameters
-        ----------
-        start, end : str, optional
-            统计区间（YYYYMMDD），默认 start='20180101'，end 为数据最新日期。
-        data_dir : str
-            数据目录。
-
-        Returns
-        -------
-        pd.DataFrame
-            列：crowd。
-        """
-        if end is None:
-            _tmp = pd.read_pickle(f'{data_dir}/close.pkl')
-            _m = _tmp.index.max()
-            end = _m.strftime('%Y%m%d') if hasattr(_m, 'strftime') else str(_m)
-        if start is None:
-            start = '20180101'
-        data_dict = cls._load_data_dict(['close', 'amount'], start, end, data_dir)
-        amt_rk = data_dict['amount'].rank(axis=1, pct=True)
-        crowd = data_dict['amount'][amt_rk > 0.9].sum(1) / data_dict['amount'].sum(1)
-        return pd.DataFrame({'crowd': crowd})
-
-
 # ============================================================================
 # Module-level aliases — 支持直接导入函数
 # ============================================================================
@@ -817,5 +858,6 @@ class StrategyAnalyzer:
 structure_stats = StrategyAnalyzer.structure_stats
 annual_stat = StrategyAnalyzer.annual_stat
 annual_metric = StrategyAnalyzer.annual_metric
+perf_percentile = StrategyAnalyzer.perf_percentile
 market_indicate = StrategyAnalyzer.market_indicate
 rolling_stats = StrategyAnalyzer.rolling_stats
