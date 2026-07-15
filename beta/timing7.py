@@ -19,9 +19,9 @@ class timing7(Beta):
         profit_rank = fr.signal_uniform(profit_ratio, 5).values
         fear_rank = fr.signal_uniform(df['closevol'], 5).values
         for i in range(4, len(df)):
-            if closerev[i]>0 and profit_rank[i]>0:
+            if closerev[i]>0 and profit_rank[i]>=0:
                 signal[i] = -1
-            elif closerev[i]<0 and fear_rank[i]>0:
+            elif closerev[i]<0 and fear_rank[i]>=0:
                 signal[i] = 1
         return signal
     
