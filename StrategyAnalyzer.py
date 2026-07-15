@@ -808,27 +808,43 @@ class StrategyAnalyzer:
         if start is None:
             start = DEFAULT_START
 
-        # 策略净值曲线
+        # 策略净值曲线 — 整数索引绘图，避免非交易日出现在x轴上
+        _date_ref = None  # 共用日期标签，取第一个策略的日期序列
+
         for pid, label in zip(pnl_list, labels):
             pnl = pnl_cache[pid].query('@start <= index <= @end')
             nav = pnl['pnl'].cumsum()
-            nav.index = pd.to_datetime(nav.index)
-            ax.plot(nav, label=label)
+            if _date_ref is None:
+                _date_ref = nav.index.tolist()
+            ax.plot(range(len(nav)), nav.values, label=label)
 
         # benchmark 曲线
         if bm_cache is not None:
             bm = bm_cache.query('@start <= index <= @end')
             bm_nav = bm['open'].pct_change().fillna(0).cumsum()
-            bm_nav.index = pd.to_datetime(bm_nav.index)
-            ax.plot(bm_nav, label=benchmark, linewidth=1.5, color='gray', alpha=0.7)
+            if _date_ref is None:
+                _date_ref = bm_nav.index.tolist()
+            ax.plot(range(len(bm_nav)), bm_nav.values, label=benchmark,
+                    linewidth=1.5, color='gray', alpha=0.7)
 
         # 样本内外划分线
-        if os_date is not None:
+        if os_date is not None and _date_ref:
             zone_suffix = f'_{zone}' if zone else ''
             calendar = pd.read_pickle(f'{self.data_dir}/calendar{zone_suffix}.pkl')
             idx = calendar.searchsorted(os_date, 'left')
-            os_trading_day = pd.to_datetime(calendar.iloc[min(idx, len(calendar) - 1)])
-            ax.axvline(os_trading_day, color='black', linestyle='--', linewidth=1.2)
+            os_trading_day = str(calendar.iloc[min(idx, len(calendar) - 1)])
+            # 在交易日序列中定位os_date位置
+            pos = next((i for i, d in enumerate(_date_ref) if str(d) >= os_trading_day), len(_date_ref))
+            ax.axvline(pos, color='black', linestyle='--', linewidth=1.2)
+
+        # x轴日期刻度（约10个）
+        if _date_ref:
+            n = len(_date_ref)
+            step = max(1, n // 10)
+            ticks = list(range(0, n, step))
+            labels = [f'{str(_date_ref[i])[:4]}-{str(_date_ref[i])[4:6]}' for i in ticks]
+            ax.set_xticks(ticks)
+            ax.set_xticklabels(labels, rotation=45)
 
         ax.legend()
         ax.set_title('PnL Comparison', fontsize=13, fontweight='bold')

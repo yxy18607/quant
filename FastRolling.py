@@ -30,7 +30,9 @@ def signal_normalize(y: pd.DataFrame, window: int, clip_level: float=1):
     return result.clip(-clip_level, clip_level)/clip_level
 
 def signal_uniform(y: pd.DataFrame, window: int):
-    return y.rolling(window).rank(pct=True)*2-1
+    rank = y.rolling(window).rank()
+    count = y.rolling(window).count()
+    return ((rank - 1) / (count - 1)) * 2 - 1
 
 def pl_minmax_scalar(lf: pl.DataFrame, window: int, src: str='factor', dst: str='pos'):
     return (lf.with_columns([pl.col(src).rolling_max(window).over('code').alias('fmax'),
@@ -39,7 +41,11 @@ def pl_minmax_scalar(lf: pl.DataFrame, window: int, src: str='factor', dst: str=
 
 def pl_pct_rank(lf: pl.DataFrame, window: int, src: str='factor', dst: str='pos'):
     df = lf.to_pandas()
-    df[dst] = df.groupby('code')[src].transform(lambda col: col.rolling(window).rank(pct=True)*2-1)
+    def _uniform_rank(col):
+        rank = col.rolling(window).rank()
+        count = col.rolling(window).count()
+        return ((rank - 1) / (count - 1)) * 2 - 1
+    df[dst] = df.groupby('code')[src].transform(_uniform_rank)
     return pl.from_pandas(df)
 
 def pl_pos_discretize(lf: pl.DataFrame, cut: int=5):
