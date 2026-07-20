@@ -34,6 +34,13 @@ def signal_uniform(y: pd.DataFrame, window: int):
     count = y.rolling(window).count()
     return ((rank - 1) / (count - 1)) * 2 - 1
 
+def signal_discretize(y: pd.DataFrame, thresholds: list):
+    """仓位离散化：按阈值列表将[-1,1]连续仓位映射为离散档位，左开右闭（-1档左闭），离散值线性对称覆盖[-1,1]"""
+    n_bins = len(thresholds) + 1
+    bins = [-1.0] + list(thresholds) + [1.0]
+    labels = np.linspace(-1, 1, n_bins)
+    return y.apply(lambda col: pd.cut(col, bins=bins, labels=labels, include_lowest=True).astype(float))
+
 def pl_minmax_scalar(lf: pl.DataFrame, window: int, src: str='factor', dst: str='pos'):
     return (lf.with_columns([pl.col(src).rolling_max(window).over('code').alias('fmax'),
                              pl.col(src).rolling_min(window).over('code').alias('fmin')])
